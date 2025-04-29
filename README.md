@@ -8,7 +8,7 @@ Team : Théo Pirouelle
 
 ---
 
-## Installation / Pré-requis
+## Installation / Pre-requisites
 
 - Install Power BI from [Microsoft Store](https://apps.microsoft.com/detail/9ntxr16hnw1t?hl=en-us&gl=US)
 - Download folders with all your scanned cards from [MTG Scanner DragonShield](https://mtg.dragonshield.com/folders)
@@ -30,7 +30,7 @@ Team : Théo Pirouelle
     <img src="img/power_bi_fermer_appliquer.png" alt="power_bi_fermer_appliquer" />
   - Wait a few moments for the data to update
  
-## Utilisation
+## Use
 
 - We recommend that you update the data when you start the file:
   - In the Power BI header, click on `Actualiser`
