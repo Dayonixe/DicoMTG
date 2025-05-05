@@ -23,8 +23,10 @@ Team : Théo Pirouelle
     <img src="img/power_bi_transformer_les_donnees.png" alt="power_bi_transformer_les_donnees" />
   - In the Power Query header, click on `Paramètres de la source de données`
     <img src="img/power_bi_sources_des_donnees.png" alt="power_bi_sources_des_donnees" />
-  - Select the local table, then click on `Changer la source...`, and keep the default settings
+  - Select your table, then click on `Changer la source...`, and keep the default settings
     <img src="img/power_bi_parametres_sources_des_donnees.png" alt="power_bi_parametres_sources_des_donnees" />
+    - You can enter the path to a file local to your computer, as in the example above with `C:\path\to\my\file.csv` ;
+    - But you can also put a path to a file hosted on the cloud, for example on a Google Drive with `https://drive.google.com/uc?export=download&id=FILE_ID`.
   - Confirm and close data source settings
   - In the Power Query header, click on the top of the `Fermer & appliquer` button
     <img src="img/power_bi_fermer_appliquer.png" alt="power_bi_fermer_appliquer" />
