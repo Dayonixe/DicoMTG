@@ -1,0 +1,998 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Suivi local de collection Magic: The Gathering"
+    />
+    <title>DicoMTG</title>
+    <link rel="preconnect" href="https://api.scryfall.com" crossorigin />
+    <link rel="preconnect" href="https://cards.scryfall.io" crossorigin />
+    <link rel="preconnect" href="https://svgs.scryfall.io" crossorigin />
+    <link rel="stylesheet" href="./styles.css" />
+    <script type="module" src="./app.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Aller au contenu</a>
+
+    <header class="app-header">
+      <div>
+        <p class="eyebrow">Collection locale</p>
+        <h1>DicoMTG</h1>
+      </div>
+      <p class="header-copy">
+        Vos cartes, leur valeur et les données à corriger — sans publication de
+        votre collection.
+      </p>
+    </header>
+
+    <nav class="app-nav" aria-label="Vues de la collection">
+      <div class="app-nav-scroll">
+        <a href="#overview" data-nav-page="overview" aria-current="page">Vue d’ensemble</a>
+        <a href="#card" data-nav-page="card">Fiche carte</a>
+        <a href="#types" data-nav-page="types">Types</a>
+        <a href="#keywords" data-nav-page="keywords">Mots-clés</a>
+        <a href="#sets" data-nav-page="sets">Extensions</a>
+        <a href="#rarities" data-nav-page="rarities">Raretés</a>
+        <a href="#collection" data-nav-page="collection">Cartes</a>
+        <a href="#deck" data-nav-page="deck">Deck Builder</a>
+        <a href="#data" data-nav-page="data">Données</a>
+      </div>
+    </nav>
+
+    <main id="main-content">
+      <p id="load-status" class="sr-only" role="status" aria-live="polite"></p>
+      <p id="load-error" class="error-banner" role="alert" hidden></p>
+
+      <section
+        id="overview"
+        class="app-page"
+        data-page="overview"
+        data-page-title="Vue d’ensemble"
+        aria-labelledby="overview-title"
+      >
+        <div class="page-heading">
+          <div>
+            <p class="eyebrow">Statistics</p>
+            <h2 id="overview-title">Vue d’ensemble</h2>
+          </div>
+          <p class="page-intro">Les indicateurs essentiels de votre collection.</p>
+        </div>
+
+        <div class="overview-summary">
+          <div class="metric-grid">
+            <article class="metric-card">
+              <p class="metric-label">Quantité possédée</p>
+              <p id="metric-quantity" class="metric-value">—</p>
+              <p class="metric-context">Quantité totale valide</p>
+            </article>
+            <article class="metric-card">
+              <p class="metric-label">Noms distincts</p>
+              <p id="metric-distinct-names" class="metric-value">—</p>
+              <p class="metric-context">Cartes uniques importées</p>
+            </article>
+            <article class="metric-card">
+              <p class="metric-label">Impressions distinctes</p>
+              <p id="metric-distinct-printings" class="metric-value">—</p>
+              <p class="metric-context">Versions appariées au catalogue</p>
+            </article>
+            <article class="metric-card metric-card--accent">
+              <p class="metric-label">Valeur estimée</p>
+              <p id="metric-value" class="metric-value">—</p>
+              <p class="metric-context">Prix disponibles</p>
+            </article>
+          </div>
+
+          <section class="most-expensive-section" aria-label="Carte la plus chère">
+            <div id="most-expensive-empty" class="most-expensive-empty">
+              Aucun prix disponible dans la collection.
+            </div>
+            <article id="most-expensive-card" class="most-expensive-card" hidden>
+              <figure class="most-expensive-visual">
+                <div class="card-image-frame">
+                  <img
+                    id="most-expensive-image"
+                    class="card-detail-image"
+                    alt=""
+                    decoding="async"
+                    referrerpolicy="no-referrer"
+                    hidden
+                  />
+                  <p id="most-expensive-image-state" aria-live="polite">
+                    Illustration en attente.
+                  </p>
+                </div>
+              </figure>
+              <div class="most-expensive-data">
+                <p id="most-expensive-price" class="most-expensive-price"></p>
+                <p id="most-expensive-context" class="most-expensive-context"></p>
+                <button id="most-expensive-detail" type="button">Voir la fiche complète</button>
+              </div>
+            </article>
+          </section>
+        </div>
+
+        <div class="overview-filter-controls">
+          <p id="overview-filter-summary" class="analytics-note" role="status" aria-live="polite">
+            Cliquez sur un graphique pour filtrer toute la vue.
+          </p>
+          <button
+            id="reset-overview-chart-filters"
+            class="analysis-reset-filters"
+            type="button"
+            hidden
+          >
+            Réinitialiser les filtres
+          </button>
+        </div>
+        <div class="chart-grid chart-grid--overview">
+          <article class="chart-panel">
+            <div class="chart-heading">
+              <h3>Couleurs</h3>
+              <p>Part des contributions</p>
+            </div>
+            <div class="chart-target" data-chart="colors">
+              <p class="chart-empty">Chargement…</p>
+            </div>
+          </article>
+          <article class="chart-panel">
+            <div class="chart-heading">
+              <h3>Types</h3>
+              <p>Part des contributions</p>
+            </div>
+            <div class="chart-target" data-chart="types">
+              <p class="chart-empty">Chargement…</p>
+            </div>
+          </article>
+          <article class="chart-panel">
+            <div class="chart-heading">
+              <h3>Courbe de mana</h3>
+              <p>Quantité par valeur</p>
+            </div>
+            <div class="chart-target" data-chart="manaValues">
+              <p class="chart-empty">Chargement…</p>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section
+        id="card"
+        class="app-page"
+        data-page="card"
+        data-page-title="Fiche carte"
+        aria-labelledby="card-detail-title"
+        hidden
+      >
+        <div class="page-heading">
+          <div>
+            <p class="eyebrow">Card view</p>
+            <h2 id="card-detail-title" tabindex="-1">Fiche carte</h2>
+          </div>
+          <a class="secondary-action" href="#collection">Choisir une carte</a>
+        </div>
+
+        <form id="card-detail-search-form" class="card-search-form">
+          <div class="field">
+            <label for="card-detail-search">Rechercher dans la collection</label>
+            <input
+              id="card-detail-search"
+              type="search"
+              list="card-detail-suggestions"
+              autocomplete="off"
+              placeholder="Ex. Serra Angel"
+            />
+            <datalist id="card-detail-suggestions"></datalist>
+          </div>
+          <button type="submit">Afficher la fiche</button>
+        </form>
+        <p id="card-detail-search-error" class="field-error" role="alert" hidden></p>
+
+        <div id="card-detail-empty" class="page-empty">
+          <p>Recherchez une carte ci-dessus ou sélectionnez son nom dans la liste.</p>
+          <a href="#collection">Ouvrir la liste des cartes</a>
+        </div>
+
+        <article id="card-detail-content" class="card-detail" hidden>
+          <div class="card-detail-data">
+            <dl id="card-detail-facts" class="card-detail-grid"></dl>
+            <section class="card-detail-rules" aria-labelledby="card-detail-rules-title">
+              <h3 id="card-detail-rules-title">Texte de la carte</h3>
+              <p id="card-detail-rules"></p>
+            </section>
+          </div>
+          <section class="card-detail-printings-section" aria-labelledby="card-detail-printings-title">
+            <h3 id="card-detail-printings-title">Versions possédées</h3>
+            <div id="card-detail-printings" class="card-detail-printings"></div>
+          </section>
+        </article>
+      </section>
+
+      <section
+        id="types"
+        class="app-page"
+        data-page="types"
+        data-page-title="Types"
+        aria-labelledby="types-title"
+        hidden
+      >
+        <div class="page-heading">
+          <div>
+            <p class="eyebrow">Type</p>
+            <h2 id="types-title">Répartition par type</h2>
+          </div>
+          <div class="type-selector">
+            <label for="type-filter">Type de carte</label>
+            <select id="type-filter" disabled>
+              <option value="">Chargement…</option>
+            </select>
+          </div>
+        </div>
+
+        <p id="type-analysis-error" class="field-error" role="alert" hidden></p>
+        <p id="type-analysis-status" class="sr-only" role="status" aria-live="polite"></p>
+
+        <div class="metric-grid metric-grid--type">
+          <article class="metric-card">
+            <p class="metric-label">Quantité possédée</p>
+            <p id="type-metric-quantity" class="metric-value">—</p>
+            <p class="metric-context">Pour le type sélectionné</p>
+          </article>
+          <article class="metric-card">
+            <p class="metric-label">Noms distincts</p>
+            <p id="type-metric-distinct-names" class="metric-value">—</p>
+            <p class="metric-context">Cartes différentes</p>
+          </article>
+          <article class="metric-card metric-card--accent">
+            <p class="metric-label">Valeur estimée</p>
+            <p id="type-metric-value" class="metric-value">—</p>
+            <p class="metric-context">Prix disponibles</p>
+          </article>
+        </div>
+
+        <div class="chart-grid chart-grid--type">
+          <article class="chart-panel">
+            <div class="chart-heading">
+              <h3>Couleurs</h3>
+            </div>
+            <div class="chart-target" data-type-chart="colors">
+              <p class="chart-empty">Chargement…</p>
+            </div>
+          </article>
+          <article class="chart-panel">
+            <div class="chart-heading">
+              <h3>Courbe de mana</h3>
+            </div>
+            <div class="chart-target" data-type-chart="manaValues">
+              <p class="chart-empty">Chargement…</p>
+            </div>
+          </article>
+        </div>
+
+        <section class="analysis-cards-panel" aria-labelledby="type-cards-title">
+          <div class="section-heading">
+            <h3 id="type-cards-title">Cartes correspondantes</h3>
+            <div class="analysis-result-controls">
+              <p id="type-result-summary" class="result-summary">Chargement…</p>
+              <button
+                id="reset-type-chart-filters"
+                class="analysis-reset-filters"
+                type="button"
+                hidden
+              >
+                Réinitialiser les filtres
+              </button>
+            </div>
+          </div>
+          <div class="table-shell" tabindex="0" aria-label="Cartes du type sélectionné">
+            <table data-sort-keys="name,setCode,quantity,colors,manaValue">
+              <thead>
+                <tr>
+                  <th scope="col">Carte</th>
+                  <th scope="col">Extension</th>
+                  <th scope="col">Qté</th>
+                  <th scope="col">Couleurs</th>
+                  <th scope="col">Mana</th>
+                </tr>
+              </thead>
+              <tbody id="type-analysis-rows">
+                <tr>
+                  <td colspan="5" class="empty-state">Chargement des cartes…</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section
+        id="keywords"
+        class="app-page"
+        data-page="keywords"
+        data-page-title="Mots-clés"
+        aria-labelledby="keywords-title"
+        hidden
+      >
+        <div class="page-heading">
+          <div>
+            <p class="eyebrow">Keyword</p>
+            <h2 id="keywords-title">Répartition par mot-clé</h2>
+          </div>
+          <p class="page-intro">Capacités présentes dans votre collection.</p>
+        </div>
+        <div class="metric-grid metric-grid--type">
+          <article class="metric-card">
+            <p class="metric-label">Quantité possédée</p>
+            <p id="keywords-metric-quantity" class="metric-value">—</p>
+            <p class="metric-context">Cartes avec un mot-clé</p>
+          </article>
+          <article class="metric-card">
+            <p class="metric-label">Noms distincts</p>
+            <p id="keywords-metric-distinct-names" class="metric-value">—</p>
+            <p class="metric-context">Cartes différentes</p>
+          </article>
+          <article class="metric-card metric-card--accent">
+            <p class="metric-label">Valeur estimée</p>
+            <p id="keywords-metric-value" class="metric-value">—</p>
+            <p class="metric-context">Prix disponibles</p>
+          </article>
+        </div>
+
+        <div class="chart-grid chart-grid--type">
+          <article class="chart-panel">
+            <div class="chart-heading">
+              <h3>Mots-clés</h3>
+            </div>
+            <div class="chart-target" data-chart="keywords">
+              <p class="chart-empty">Chargement…</p>
+            </div>
+          </article>
+          <article class="chart-panel">
+            <div class="chart-heading">
+              <h3>Courbe de mana</h3>
+            </div>
+            <div class="chart-target" data-facet-mana-chart="keywords">
+              <p class="chart-empty">Chargement…</p>
+            </div>
+          </article>
+        </div>
+
+        <section class="analysis-cards-panel" aria-labelledby="keywords-cards-title">
+          <div class="section-heading">
+            <h3 id="keywords-cards-title">Cartes correspondantes</h3>
+            <div class="analysis-result-controls">
+              <p id="keywords-result-summary" class="result-summary">Chargement…</p>
+              <button
+                id="reset-keywords-chart-filters"
+                class="analysis-reset-filters"
+                type="button"
+                hidden
+              >
+                Réinitialiser les filtres
+              </button>
+            </div>
+          </div>
+          <div class="table-shell" tabindex="0" aria-label="Cartes des mots-clés sélectionnés">
+            <table data-sort-keys="name,setCode,quantity,colors,manaValue">
+              <thead>
+                <tr>
+                  <th scope="col">Carte</th>
+                  <th scope="col">Extension</th>
+                  <th scope="col">Qté</th>
+                  <th scope="col">Couleurs</th>
+                  <th scope="col">Mana</th>
+                </tr>
+              </thead>
+              <tbody id="keywords-analysis-rows">
+                <tr><td colspan="5" class="empty-state">Chargement des cartes…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section
+        id="sets"
+        class="app-page"
+        data-page="sets"
+        data-page-title="Extensions"
+        aria-labelledby="sets-title"
+        hidden
+      >
+        <div class="page-heading">
+          <div>
+            <p class="eyebrow">Set</p>
+            <h2 id="sets-title">Répartition par extension</h2>
+          </div>
+          <p class="page-intro">Quantités possédées pour chaque édition.</p>
+        </div>
+        <div class="metric-grid metric-grid--type">
+          <article class="metric-card">
+            <p class="metric-label">Quantité possédée</p>
+            <p id="sets-metric-quantity" class="metric-value">—</p>
+            <p class="metric-context">Cartes avec une extension</p>
+          </article>
+          <article class="metric-card">
+            <p class="metric-label">Noms distincts</p>
+            <p id="sets-metric-distinct-names" class="metric-value">—</p>
+            <p class="metric-context">Cartes différentes</p>
+          </article>
+          <article class="metric-card metric-card--accent">
+            <p class="metric-label">Valeur estimée</p>
+            <p id="sets-metric-value" class="metric-value">—</p>
+            <p class="metric-context">Prix disponibles</p>
+          </article>
+        </div>
+
+        <div class="chart-grid chart-grid--type">
+          <article class="chart-panel">
+            <div class="chart-heading">
+              <h3>Extensions</h3>
+            </div>
+            <div class="chart-target" data-chart="sets">
+              <p class="chart-empty">Chargement…</p>
+            </div>
+          </article>
+          <article class="chart-panel">
+            <div class="chart-heading">
+              <h3>Courbe de mana</h3>
+            </div>
+            <div class="chart-target" data-facet-mana-chart="sets">
+              <p class="chart-empty">Chargement…</p>
+            </div>
+          </article>
+        </div>
+
+        <section class="analysis-cards-panel" aria-labelledby="sets-cards-title">
+          <div class="section-heading">
+            <h3 id="sets-cards-title">Cartes correspondantes</h3>
+            <div class="analysis-result-controls">
+              <p id="sets-result-summary" class="result-summary">Chargement…</p>
+              <button
+                id="reset-sets-chart-filters"
+                class="analysis-reset-filters"
+                type="button"
+                hidden
+              >
+                Réinitialiser les filtres
+              </button>
+            </div>
+          </div>
+          <div class="table-shell" tabindex="0" aria-label="Cartes des extensions sélectionnées">
+            <table data-sort-keys="name,setCode,quantity,colors,manaValue">
+              <thead>
+                <tr>
+                  <th scope="col">Carte</th>
+                  <th scope="col">Extension</th>
+                  <th scope="col">Qté</th>
+                  <th scope="col">Couleurs</th>
+                  <th scope="col">Mana</th>
+                </tr>
+              </thead>
+              <tbody id="sets-analysis-rows">
+                <tr><td colspan="5" class="empty-state">Chargement des cartes…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section
+        id="rarities"
+        class="app-page"
+        data-page="rarities"
+        data-page-title="Raretés"
+        aria-labelledby="rarities-title"
+        hidden
+      >
+        <div class="page-heading">
+          <div>
+            <p class="eyebrow">Rarity</p>
+            <h2 id="rarities-title">Répartition par rareté</h2>
+          </div>
+          <p class="page-intro">Structure de la collection par niveau de rareté.</p>
+        </div>
+        <div class="metric-grid metric-grid--type">
+          <article class="metric-card">
+            <p class="metric-label">Quantité possédée</p>
+            <p id="rarities-metric-quantity" class="metric-value">—</p>
+            <p class="metric-context">Cartes avec une rareté</p>
+          </article>
+          <article class="metric-card">
+            <p class="metric-label">Noms distincts</p>
+            <p id="rarities-metric-distinct-names" class="metric-value">—</p>
+            <p class="metric-context">Cartes différentes</p>
+          </article>
+          <article class="metric-card metric-card--accent">
+            <p class="metric-label">Valeur estimée</p>
+            <p id="rarities-metric-value" class="metric-value">—</p>
+            <p class="metric-context">Prix disponibles</p>
+          </article>
+        </div>
+
+        <div class="chart-grid chart-grid--type">
+          <article class="chart-panel">
+            <div class="chart-heading">
+              <h3>Raretés</h3>
+            </div>
+            <div class="chart-target" data-chart="rarities">
+              <p class="chart-empty">Chargement…</p>
+            </div>
+          </article>
+          <article class="chart-panel">
+            <div class="chart-heading">
+              <h3>Courbe de mana</h3>
+            </div>
+            <div class="chart-target" data-facet-mana-chart="rarities">
+              <p class="chart-empty">Chargement…</p>
+            </div>
+          </article>
+        </div>
+
+        <section class="analysis-cards-panel" aria-labelledby="rarities-cards-title">
+          <div class="section-heading">
+            <h3 id="rarities-cards-title">Cartes correspondantes</h3>
+            <div class="analysis-result-controls">
+              <p id="rarities-result-summary" class="result-summary">Chargement…</p>
+              <button
+                id="reset-rarities-chart-filters"
+                class="analysis-reset-filters"
+                type="button"
+                hidden
+              >
+                Réinitialiser les filtres
+              </button>
+            </div>
+          </div>
+          <div class="table-shell" tabindex="0" aria-label="Cartes des raretés sélectionnées">
+            <table data-sort-keys="name,setCode,quantity,colors,manaValue">
+              <thead>
+                <tr>
+                  <th scope="col">Carte</th>
+                  <th scope="col">Extension</th>
+                  <th scope="col">Qté</th>
+                  <th scope="col">Couleurs</th>
+                  <th scope="col">Mana</th>
+                </tr>
+              </thead>
+              <tbody id="rarities-analysis-rows">
+                <tr><td colspan="5" class="empty-state">Chargement des cartes…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section
+        id="collection"
+        class="app-page collection-panel"
+        data-page="collection"
+        data-page-title="Cartes"
+        aria-labelledby="collection-title"
+        hidden
+      >
+        <div class="page-heading">
+          <div>
+            <p class="eyebrow">List of cards</p>
+            <h2 id="collection-title">Liste des cartes</h2>
+          </div>
+          <p id="result-summary" class="result-summary">Chargement…</p>
+        </div>
+
+        <form id="filters" class="filters">
+          <div class="field field--search">
+            <label for="search">Rechercher une carte</label>
+            <input
+              id="search"
+              name="search"
+              type="search"
+              list="card-name-suggestions"
+              autocomplete="off"
+              placeholder="Ex. Serra Angel"
+            />
+            <datalist id="card-name-suggestions"></datalist>
+          </div>
+
+          <fieldset class="color-filter">
+            <legend>Couleurs</legend>
+            <div class="color-options">
+              <label><input type="checkbox" name="color" value="W" /><span data-mana-symbol="{W}"></span></label>
+              <label><input type="checkbox" name="color" value="U" /><span data-mana-symbol="{U}"></span></label>
+              <label><input type="checkbox" name="color" value="B" /><span data-mana-symbol="{B}"></span></label>
+              <label><input type="checkbox" name="color" value="R" /><span data-mana-symbol="{R}"></span></label>
+              <label><input type="checkbox" name="color" value="G" /><span data-mana-symbol="{G}"></span></label>
+            </div>
+          </fieldset>
+
+          <div class="field">
+            <label for="rarity">Rareté</label>
+            <select id="rarity" name="rarity">
+              <option value="">Toutes</option>
+              <option value="common">Commune</option>
+              <option value="uncommon">Peu commune</option>
+              <option value="rare">Rare</option>
+              <option value="mythic">Mythique</option>
+            </select>
+          </div>
+
+          <button id="apply-filters" type="submit">Appliquer</button>
+        </form>
+
+        <div class="table-shell" tabindex="0" aria-label="Tableau de la collection">
+          <table data-sort-keys="name,setCode,collectorNumber,quantity,finish,rarity,colors,manaValue,priceCents,status">
+            <caption class="sr-only">Cartes de la collection correspondant aux filtres</caption>
+            <thead>
+              <tr>
+                <th scope="col">Carte</th>
+                <th scope="col">Extension</th>
+                <th scope="col">Numéro</th>
+                <th scope="col">Qté</th>
+                <th scope="col">Finition</th>
+                <th scope="col">Rareté</th>
+                <th scope="col">Couleurs</th>
+                <th scope="col">Mana</th>
+                <th scope="col">Prix</th>
+                <th scope="col">Statut</th>
+              </tr>
+            </thead>
+            <tbody id="collection-rows">
+              <tr>
+                <td colspan="10" class="empty-state">Chargement de la collection…</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section
+        id="deck"
+        class="app-page"
+        data-page="deck"
+        data-page-title="Deck Builder"
+        aria-labelledby="deck-title"
+        hidden
+      >
+        <div class="page-heading">
+          <div>
+            <p class="eyebrow">Help Deck Builder</p>
+            <h2 id="deck-title">Aide à la construction de deck</h2>
+          </div>
+          <p class="page-intro">
+            Répartissez vos terrains de base selon les couleurs de votre deck.
+          </p>
+        </div>
+
+        <div class="deck-builder-layout">
+          <div class="deck-builder-controls">
+            <section class="deck-control-section" aria-labelledby="deck-land-settings-title">
+              <h3 id="deck-land-settings-title">Terrains disponibles</h3>
+              <div class="deck-control-grid deck-control-grid--slots">
+                <div class="deck-control">
+                  <label for="deck-basic-slots">Emplacements pour les terrains de base</label>
+                  <div class="deck-control-inputs">
+                    <input id="deck-basic-slots" type="number" min="0" max="40" step="1" value="24" data-deck-number="basicSlots" />
+                    <input type="range" min="0" max="40" step="1" value="24" data-deck-range="basicSlots" aria-label="Emplacements pour les terrains de base" />
+                  </div>
+                </div>
+              </div>
+              <div class="deck-control-grid">
+                <div class="deck-control">
+                  <label for="deck-lands-w">Terrains multicolores — blanc</label>
+                  <div class="deck-control-inputs">
+                    <input id="deck-lands-w" type="number" min="0" max="20" step="1" value="8" data-deck-number="lands-W" />
+                    <input type="range" min="0" max="20" step="1" value="8" data-deck-range="lands-W" aria-label="Terrains multicolores fournissant du mana blanc" />
+                  </div>
+                </div>
+                <div class="deck-control">
+                  <label for="deck-lands-u">Terrains multicolores — bleu</label>
+                  <div class="deck-control-inputs">
+                    <input id="deck-lands-u" type="number" min="0" max="20" step="1" value="0" data-deck-number="lands-U" />
+                    <input type="range" min="0" max="20" step="1" value="0" data-deck-range="lands-U" aria-label="Terrains multicolores fournissant du mana bleu" />
+                  </div>
+                </div>
+                <div class="deck-control">
+                  <label for="deck-lands-b">Terrains multicolores — noir</label>
+                  <div class="deck-control-inputs">
+                    <input id="deck-lands-b" type="number" min="0" max="20" step="1" value="8" data-deck-number="lands-B" />
+                    <input type="range" min="0" max="20" step="1" value="8" data-deck-range="lands-B" aria-label="Terrains multicolores fournissant du mana noir" />
+                  </div>
+                </div>
+                <div class="deck-control">
+                  <label for="deck-lands-r">Terrains multicolores — rouge</label>
+                  <div class="deck-control-inputs">
+                    <input id="deck-lands-r" type="number" min="0" max="20" step="1" value="7" data-deck-number="lands-R" />
+                    <input type="range" min="0" max="20" step="1" value="7" data-deck-range="lands-R" aria-label="Terrains multicolores fournissant du mana rouge" />
+                  </div>
+                </div>
+                <div class="deck-control">
+                  <label for="deck-lands-g">Terrains multicolores — vert</label>
+                  <div class="deck-control-inputs">
+                    <input id="deck-lands-g" type="number" min="0" max="20" step="1" value="0" data-deck-number="lands-G" />
+                    <input type="range" min="0" max="20" step="1" value="0" data-deck-range="lands-G" aria-label="Terrains multicolores fournissant du mana vert" />
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section class="deck-control-section" aria-labelledby="deck-card-settings-title">
+              <h3 id="deck-card-settings-title">Coûts colorés du deck</h3>
+              <p class="deck-control-help">
+                Une carte multicolore compte une fois pour chaque couleur de son coût.
+              </p>
+              <div class="deck-control-grid">
+                <div class="deck-control">
+                  <label for="deck-cards-w">Cartes avec un coût blanc</label>
+                  <div class="deck-control-inputs">
+                    <input id="deck-cards-w" type="number" min="0" max="50" step="1" value="30" data-deck-number="cards-W" />
+                    <input type="range" min="0" max="50" step="1" value="30" data-deck-range="cards-W" aria-label="Cartes avec un coût blanc" />
+                  </div>
+                </div>
+                <div class="deck-control">
+                  <label for="deck-cards-u">Cartes avec un coût bleu</label>
+                  <div class="deck-control-inputs">
+                    <input id="deck-cards-u" type="number" min="0" max="50" step="1" value="0" data-deck-number="cards-U" />
+                    <input type="range" min="0" max="50" step="1" value="0" data-deck-range="cards-U" aria-label="Cartes avec un coût bleu" />
+                  </div>
+                </div>
+                <div class="deck-control">
+                  <label for="deck-cards-b">Cartes avec un coût noir</label>
+                  <div class="deck-control-inputs">
+                    <input id="deck-cards-b" type="number" min="0" max="50" step="1" value="24" data-deck-number="cards-B" />
+                    <input type="range" min="0" max="50" step="1" value="24" data-deck-range="cards-B" aria-label="Cartes avec un coût noir" />
+                  </div>
+                </div>
+                <div class="deck-control">
+                  <label for="deck-cards-r">Cartes avec un coût rouge</label>
+                  <div class="deck-control-inputs">
+                    <input id="deck-cards-r" type="number" min="0" max="50" step="1" value="23" data-deck-number="cards-R" />
+                    <input type="range" min="0" max="50" step="1" value="23" data-deck-range="cards-R" aria-label="Cartes avec un coût rouge" />
+                  </div>
+                </div>
+                <div class="deck-control">
+                  <label for="deck-cards-g">Cartes avec un coût vert</label>
+                  <div class="deck-control-inputs">
+                    <input id="deck-cards-g" type="number" min="0" max="50" step="1" value="0" data-deck-number="cards-G" />
+                    <input type="range" min="0" max="50" step="1" value="0" data-deck-range="cards-G" aria-label="Cartes avec un coût vert" />
+                  </div>
+                </div>
+              </div>
+            </section>
+          </div>
+
+          <article class="chart-panel deck-land-result" aria-labelledby="deck-land-result-title">
+            <div class="chart-heading">
+              <h3 id="deck-land-result-title">Terrains de base requis</h3>
+            </div>
+            <div class="deck-land-chart" aria-live="polite">
+              <div id="deck-land-stack" class="deck-land-stack" role="img"></div>
+              <ul id="deck-land-legend" class="deck-land-legend"></ul>
+            </div>
+            <p id="deck-land-message" class="analytics-note"></p>
+          </article>
+        </div>
+      </section>
+
+      <section
+        id="data"
+        class="app-page"
+        data-page="data"
+        data-page-title="Données"
+        aria-labelledby="data-title"
+        hidden
+      >
+        <div class="page-heading">
+          <div>
+            <p class="eyebrow">Maintenance locale</p>
+            <h2 id="data-title">Données et diagnostics</h2>
+          </div>
+          <p class="page-intro">Actualisez les sources puis importez votre export DragonShield.</p>
+        </div>
+
+        <div class="metric-grid metric-grid--data">
+          <article class="metric-card">
+            <p class="metric-label">Couverture des prix</p>
+            <p id="metric-coverage" class="metric-value">—</p>
+            <p class="metric-context">Impressions appariées tarifées</p>
+          </article>
+          <article class="metric-card metric-card--warning">
+            <p class="metric-label">Sans prix</p>
+            <p id="metric-unpriced" class="metric-value">—</p>
+            <p class="metric-context">Impressions à surveiller</p>
+          </article>
+        </div>
+
+        <section class="reference-panel" aria-labelledby="reference-title">
+          <div class="reference-layout">
+            <div class="reference-copy">
+              <p class="eyebrow">Référentiel</p>
+              <h3 id="reference-title">Catalogue et prix</h3>
+              <p>
+                Actualisez le catalogue et les prix. Les dernières données valides
+                restent disponibles en cas d’échec.
+              </p>
+            </div>
+
+            <dl class="reference-counts">
+              <div>
+                <dt>Catalogue</dt>
+                <dd id="catalog-status">Chargement…</dd>
+              </div>
+              <div>
+                <dt>Prix</dt>
+                <dd id="price-status">Chargement…</dd>
+              </div>
+            </dl>
+
+            <button id="update-reference-data" type="button">Actualiser</button>
+          </div>
+          <p class="field-help">
+            Une connexion est nécessaire. Après la première synchronisation,
+            importez ou réimportez votre collection pour appliquer le catalogue.
+          </p>
+          <p id="reference-error" class="field-error" role="alert" hidden></p>
+          <p id="reference-result" class="reference-result" role="status" aria-live="polite" hidden></p>
+        </section>
+
+        <section class="cache-panel" aria-labelledby="image-cache-title">
+          <div class="cache-layout">
+            <div class="cache-copy">
+              <p class="eyebrow">Stockage local</p>
+              <h3 id="image-cache-title">Cache des illustrations</h3>
+              <p>
+                Les aperçus consultés sont conservés pour accélérer les affichages.
+                Les plus anciens sont supprimés automatiquement à la limite de 250 Mio.
+              </p>
+            </div>
+            <div class="cache-meter">
+              <p id="image-cache-usage" role="status" aria-live="polite">Chargement…</p>
+              <progress id="image-cache-progress" value="0" max="1">
+                Occupation du cache
+              </progress>
+            </div>
+            <button id="clear-image-cache" type="button" disabled>Vider le cache</button>
+          </div>
+          <p id="image-cache-error" class="field-error" role="alert" hidden></p>
+        </section>
+
+        <section class="collections-panel" aria-labelledby="managed-collections-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Collections affichées</p>
+              <h3 id="managed-collections-title">Mes imports DragonShield</h3>
+            </div>
+            <p class="result-summary">Cochez les collections à fusionner dans les analyses.</p>
+          </div>
+          <div id="managed-collections" class="managed-collections" role="list">
+            <p class="managed-collections-empty">Chargement des collections…</p>
+          </div>
+          <p id="managed-collections-status" class="sr-only" role="status" aria-live="polite"></p>
+          <p id="managed-collections-error" class="field-error" role="alert" hidden></p>
+        </section>
+
+        <section class="import-panel" aria-labelledby="import-title">
+          <div class="import-layout">
+            <div class="import-copy">
+              <p class="eyebrow">Import local</p>
+              <h3 id="import-title">Ajouter une collection</h3>
+              <p>
+                Nommez l’export CSV complet de DragonShield, puis choisissez un
+                fichier local ou indiquez un lien public.
+              </p>
+            </div>
+
+            <form id="collection-import" class="import-form" novalidate>
+              <div class="field import-name-field">
+                <label for="collection-name">Nom de la collection</label>
+                <input
+                  id="collection-name"
+                  name="collection-name"
+                  type="text"
+                  maxlength="80"
+                  autocomplete="off"
+                  placeholder="Ex. Ma collection"
+                  required
+                />
+              </div>
+              <div class="field file-field">
+                <div id="collection-drop-zone" class="collection-drop-zone">
+                  <label for="collection-file">Export CSV DragonShield</label>
+                  <input
+                    id="collection-file"
+                    name="collection-file"
+                    type="file"
+                    accept=".csv,text/csv"
+                    aria-describedby="collection-file-help collection-import-error"
+                  />
+                  <p id="collection-file-help" class="field-help">
+                    Choisissez un fichier ou déposez-le ici. Le chemin n’est pas conservé.
+                  </p>
+                  <p id="collection-file-status" class="collection-file-status" aria-live="polite">
+                    Aucun fichier sélectionné.
+                  </p>
+                </div>
+              </div>
+              <p class="import-separator" aria-hidden="true">ou</p>
+              <div class="field import-url-field">
+                <label for="collection-url">Lien public vers le CSV</label>
+                <input
+                  id="collection-url"
+                  name="collection-url"
+                  type="url"
+                  inputmode="url"
+                  autocomplete="url"
+                  placeholder="https://drive.google.com/…"
+                  aria-describedby="collection-url-help collection-import-error"
+                />
+                <p id="collection-url-help" class="field-help">
+                  Les liens Google Drive doivent être accessibles à toute personne disposant du lien.
+                </p>
+              </div>
+              <div class="import-actions">
+                <button id="import-collection" type="submit">Ajouter</button>
+                <button id="cancel-collection-update" class="secondary-button" type="button" hidden>
+                  Annuler
+                </button>
+              </div>
+            </form>
+          </div>
+
+          <p id="collection-import-error" class="field-error" role="alert" hidden></p>
+          <div id="import-result" class="import-result" role="status" aria-live="polite" hidden>
+            <p id="import-summary"></p>
+            <details id="import-issues" hidden>
+              <summary>Lignes invalides</summary>
+              <ul id="import-issue-list"></ul>
+            </details>
+          </div>
+        </section>
+
+        <section class="diagnostics-panel" aria-labelledby="diagnostics-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Qualité des données</p>
+              <h3 id="diagnostics-title">Diagnostics de la collection</h3>
+            </div>
+            <p id="diagnostics-summary" class="result-summary">Chargement…</p>
+          </div>
+
+          <div class="diagnostics-grid">
+            <article class="diagnostic-card">
+              <h4>Lignes invalides <span id="invalid-count" class="diagnostic-count">0</span></h4>
+              <ul id="invalid-diagnostics" class="diagnostic-list">
+                <li class="diagnostic-empty">Aucune ligne invalide.</li>
+              </ul>
+            </article>
+            <article class="diagnostic-card">
+              <h4>Cartes à vérifier <span id="unresolved-count" class="diagnostic-count">0</span></h4>
+              <ul id="unresolved-diagnostics" class="diagnostic-list">
+                <li class="diagnostic-empty">Aucune carte à vérifier.</li>
+              </ul>
+            </article>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <figure id="card-preview" class="card-preview" role="tooltip" hidden>
+      <div class="card-image-frame">
+        <img
+          id="card-preview-image"
+          class="card-detail-image card-preview-image"
+          alt=""
+          decoding="async"
+          referrerpolicy="no-referrer"
+          hidden
+        />
+        <p id="card-preview-image-state" aria-live="polite">
+          Illustration en attente.
+        </p>
+      </div>
+      <figcaption>
+        <strong id="card-preview-name"></strong>
+        <span id="card-preview-meta"></span>
+      </figcaption>
+    </figure>
+  </body>
+</html>

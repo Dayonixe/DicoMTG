@@ -1,0 +1,18 @@
+[package]
+name = "dicomtg-desktop"
+version = "3.0.0"
+edition = "2024"
+publish = false
+build = "build.rs"
+
+[lib]
+name = "dicomtg_desktop_lib"
+crate-type = ["rlib"]
+
+[dependencies]
+dicomtg-core = { path = "../../../crates/dicomtg-core" }
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "2", features = [] }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }

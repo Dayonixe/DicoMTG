@@ -1,0 +1,7 @@
+sep=,
+Quantity,Card Name,Set Code,Card Number
+2,"Who, What, When, Where, Why", unh , 001a 
+0,Zero Quantity,TST,1
+not-a-number,Broken Quantity,TST,2
+1,Missing Set,,3
+

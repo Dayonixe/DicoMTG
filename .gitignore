@@ -1,0 +1,4 @@
+/target/
+/.rtk-local/
+/.ui-evidence/
+/apps/dicomtg-desktop/node_modules/

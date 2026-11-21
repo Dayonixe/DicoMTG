@@ -1,0 +1,54 @@
+import { finishLabel, statusLabel } from "./formatters.js";
+
+const collator = new Intl.Collator("fr", { numeric: true, sensitivity: "base" });
+
+const sortValues = {
+  name: (item) => item.name,
+  setCode: (item) => item.setCode,
+  collectorNumber: (item) => item.collectorNumber,
+  quantity: (item) => item.quantity,
+  finish: (item) => finishLabel(item.finish),
+  rarity: (item) => item.rarity,
+  colors: (item) => (item.colors.length ? item.colors.join(" ") : null),
+  manaValue: (item) => item.manaValue,
+  priceCents: (item) => item.priceCents,
+  status: (item) => statusLabel(item.status),
+};
+
+export const DEFAULT_CARD_SORT = Object.freeze({
+  key: "name",
+  direction: "ascending",
+});
+
+export function nextCardSort(current, key) {
+  return {
+    key,
+    direction:
+      current.key === key && current.direction === "ascending"
+        ? "descending"
+        : "ascending",
+  };
+}
+
+export function sortCards(items, sort = DEFAULT_CARD_SORT) {
+  const valueFor = sortValues[sort.key] ?? sortValues.name;
+  const direction = sort.direction === "descending" ? -1 : 1;
+
+  return [...items].sort((left, right) => {
+    const leftValue = valueFor(left);
+    const rightValue = valueFor(right);
+    const leftMissing = leftValue === null || leftValue === undefined || leftValue === "";
+    const rightMissing =
+      rightValue === null || rightValue === undefined || rightValue === "";
+
+    if (leftMissing !== rightMissing) return leftMissing ? 1 : -1;
+    if (!leftMissing) {
+      const comparison =
+        typeof leftValue === "number" && typeof rightValue === "number"
+          ? leftValue - rightValue
+          : collator.compare(String(leftValue), String(rightValue));
+      if (comparison !== 0) return comparison * direction;
+    }
+    return collator.compare(left.name, right.name);
+  });
+}

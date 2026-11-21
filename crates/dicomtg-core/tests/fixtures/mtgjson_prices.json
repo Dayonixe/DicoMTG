@@ -1,0 +1,56 @@
+{
+  "meta": {
+    "date": "2026-11-15",
+    "version": "5.3.0"
+  },
+  "data": {
+    "expensive-uuid": {
+      "paper": {
+        "cardmarket": {
+          "currency": "EUR",
+          "retail": {
+            "normal": {
+              "2026-11-14": 12.34,
+              "2026-11-15": 13.45
+            },
+            "foil": {
+              "2026-11-15": 99.99
+            }
+          }
+        },
+        "tcgplayer": {
+          "currency": "USD",
+          "retail": {
+            "normal": {
+              "2026-11-15": 20.00
+            }
+          }
+        }
+      }
+    },
+    "cheap-uuid": {
+      "paper": {
+        "cardmarket": {
+          "currency": "EUR",
+          "retail": {
+            "normal": {
+              "2026-11-15": 0.50
+            }
+          }
+        }
+      }
+    },
+    "without-normal-price": {
+      "paper": {
+        "cardmarket": {
+          "currency": "EUR",
+          "retail": {
+            "foil": {
+              "2026-11-15": 1.25
+            }
+          }
+        }
+      }
+    }
+  }
+}

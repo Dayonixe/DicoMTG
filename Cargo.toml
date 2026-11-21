@@ -1,0 +1,4 @@
+[workspace]
+members = ["apps/dicomtg-desktop/src-tauri", "crates/dicomtg-core"]
+resolver = "2"
+
