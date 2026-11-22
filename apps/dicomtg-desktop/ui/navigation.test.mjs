@@ -175,8 +175,75 @@ test("supports named collections from a picker, drop zone, or public URL", () =>
   assert.match(script, /dragover/);
   assert.match(script, /drop/);
   assert.match(script, /set_collection_selected/);
-  assert.match(script, /rename_collection/);
+  assert.doesNotMatch(html, /id="collection-reimport/);
+  assert.match(script, /window\.confirm\([\s\S]*?invoke\("delete_collection"/);
+  assert.doesNotMatch(script, /window\.prompt|invoke\("rename_collection"/);
   assert.match(script, /download_collection_csv/);
+});
+
+test("prefills the existing collection name and remembered Drive link for editing", () => {
+  const script = readFileSync(new URL("./app.js", import.meta.url), "utf8");
+  const context = {
+    collectionUpdateTarget: undefined,
+    importTitle: { scrollIntoView() {} },
+    collectionNameInput: { focus() {} },
+    collectionUrlInput: {},
+    cancelCollectionUpdateButton: {},
+    importResult: {},
+    resetImportSource() { context.collectionUrlInput.value = ""; },
+    clearImportError() {},
+    setImportLoading() {},
+    collection: { name: "Ma collection", driveUrl: "https://drive.google.com/open?id=abc" },
+  };
+  const start = script.indexOf("function setCollectionImportMode(");
+  runInNewContext(script.slice(start, script.indexOf("\nfunction ", start + 1)) +
+    "\nsetCollectionImportMode(collection);", context);
+  assert.equal(context.collectionNameInput.value, context.collection.name);
+  assert.equal(context.collectionUrlInput.value, context.collection.driveUrl);
+});
+
+test("reimports from the prefilled Drive link and saves only the name when cleared", async () => {
+  const script = readFileSync(new URL("./app.js", import.meta.url), "utf8");
+  const start = script.indexOf('importForm.addEventListener("submit"');
+  const submit = script.slice(start, script.indexOf("\nfunction ", start + 1));
+  const link = "https://drive.google.com/open?id=abc";
+  for (const url of [link, ""]) {
+    const calls = [];
+    const context = {
+      importForm: { addEventListener(_event, handler) { context.submit = handler; } },
+      importButton: {},
+      importInProgress: false,
+      appUpdater: { installing: false },
+      collectionNameInput: { value: "Nouveau nom" },
+      collectionUpdateTarget: { id: 4, driveUrl: link },
+      selectedImportFile: undefined,
+      collectionUrlInput: { value: url },
+      importResult: {}, importSummary: {}, importIssues: {}, statusRegion: {},
+      collectionSnapshotCurrent: true,
+      clearImportError() {},
+      showImportError: assert.fail,
+      setImportLoading() {},
+      async invoke(command, args) {
+        calls.push(command);
+        if (command === "download_collection_csv") {
+          assert.equal(args.url, link);
+          return "csv";
+        }
+        assert.equal(args.collectionId, 4);
+        assert.equal(args.name, "Nouveau nom");
+        assert.equal(args.csv, url ? "csv" : null);
+        assert.equal(args.sourceUrl, url || null);
+        return url ? {} : null;
+      },
+      async loadManagedCollections() {},
+      async loadDashboard() { return true; },
+      setCollectionImportMode() {},
+      renderImportResult() {},
+    };
+    runInNewContext(submit, context);
+    await context.submit({ preventDefault() {} });
+    assert.deepEqual(calls, url ? ["download_collection_csv", "update_collection"] : ["update_collection"]);
+  }
 });
 
 test("offers assisted card searches without displaying the image provider", () => {

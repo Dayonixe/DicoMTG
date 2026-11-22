@@ -10,18 +10,19 @@ use std::{
 
 use dicomtg_core::{
     CardImageCacheStats, CardImageFace, CardImageSize, CollectionItemStatus, CollectionListItem,
-    CollectionQuery, CollectionSnapshot, CollectionStore, DistributionEntry, MatchResult,
-    RowIssueReason, analyze_collection, analyze_collection_by_type, build_collection,
+    CollectionQuery, CollectionSnapshot, CollectionStore, DistributionEntry, ImportError,
+    MatchResult, RowIssueReason, analyze_collection, analyze_collection_by_type, build_collection,
     card_image_cache_stats, clear_card_image_cache,
-    download_collection_csv as fetch_collection_csv, import_dragonshield_csv, is_valid_iso_date,
-    load_card_image, load_card_localization as fetch_card_localization, most_expensive_card,
-    query_collection, rematch_collection, update_catalog_from_mtgjson,
-    update_prices_from_cardmarket,
+    download_collection_csv as fetch_collection_csv, google_drive_source_url,
+    import_collection_csv as parse_collection_csv, is_valid_iso_date, load_card_image,
+    load_card_localization as fetch_card_localization, most_expensive_card, query_collection,
+    rematch_collection, update_catalog_from_mtgjson, update_prices_from_cardmarket,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{State, ipc::Response};
 
 pub struct AppState {
+    pub(crate) update_gate: crate::updater::UpdateGate,
     store: Arc<Mutex<CollectionStore>>,
     collection_writer: Arc<Mutex<CollectionStore>>,
     update_directory: PathBuf,
@@ -39,6 +40,7 @@ impl AppState {
         image_directory: PathBuf,
     ) -> Self {
         Self {
+            update_gate: crate::updater::UpdateGate::default(),
             store: Arc::new(Mutex::new(store)),
             collection_writer: Arc::new(Mutex::new(collection_writer)),
             update_directory,
@@ -155,6 +157,7 @@ struct CollectionItemDto {
 pub struct ImportSummaryDto {
     valid_rows: usize,
     invalid_rows: usize,
+    ignored_rows: usize,
     matched_printings: usize,
     unmatched_rows: usize,
     ambiguous_rows: usize,
@@ -169,6 +172,7 @@ pub struct ManagedCollectionDto {
     name: String,
     selected: bool,
     total_quantity: u64,
+    drive_url: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -428,10 +432,16 @@ pub(crate) fn create_collection_csv(
     store: &mut CollectionStore,
     name: &str,
     csv: &str,
+    source_url: Option<&str>,
 ) -> Result<ImportSummaryDto, String> {
     let (collection, summary) = build_collection_import(store, csv)?;
+    let drive_url = source_url
+        .map(google_drive_source_url)
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .flatten();
     store
-        .create_collection(name, &collection)
+        .create_collection_with_drive_url(name, &collection, drive_url)
         .map_err(|error| error.to_string())?;
     Ok(summary)
 }
@@ -439,29 +449,48 @@ pub(crate) fn create_collection_csv(
 pub(crate) fn update_collection_csv(
     store: &mut CollectionStore,
     collection_id: i64,
-    csv: &str,
-) -> Result<ImportSummaryDto, String> {
-    let (collection, summary) = build_collection_import(store, csv)?;
-    store
-        .replace_collection_for(collection_id, &collection)
+    name: &str,
+    csv: Option<&str>,
+    source_url: Option<&str>,
+) -> Result<Option<ImportSummaryDto>, String> {
+    let replacement = csv
+        .map(|csv| build_collection_import(store, csv))
+        .transpose()?;
+    let drive_url = source_url
+        .map(google_drive_source_url)
+        .transpose()
         .map_err(|error| error.to_string())?;
-    Ok(summary)
+    store
+        .update_named_collection(
+            collection_id,
+            name,
+            drive_url,
+            replacement.as_ref().map(|(collection, _)| collection),
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(replacement.map(|(_, summary)| summary))
 }
 
 fn build_collection_import(
     store: &CollectionStore,
     csv: &str,
 ) -> Result<(CollectionSnapshot, ImportSummaryDto), String> {
-    let catalog = store.load_catalog().map_err(|error| error.to_string())?;
     let report =
-        import_dragonshield_csv(Cursor::new(csv.as_bytes())).map_err(|error| error.to_string())?;
+        parse_collection_csv(Cursor::new(csv.as_bytes())).map_err(|error| match error {
+            ImportError::NoSortedMagicFolders => {
+                "L’export Sorted ne contient aucune carte dans un dossier Magic.".to_owned()
+            }
+            _ => error.to_string(),
+        })?;
     let valid_rows = report.cards().len();
     let invalid_rows = report.issues().len();
+    let ignored_rows = report.ignored_rows();
 
     if valid_rows == 0 && invalid_rows > 0 {
         return Err("Import refusé : aucune ligne valide dans le fichier.".to_owned());
     }
 
+    let catalog = store.load_catalog().map_err(|error| error.to_string())?;
     let issues = report
         .issues()
         .iter()
@@ -501,6 +530,7 @@ fn build_collection_import(
     let summary = ImportSummaryDto {
         valid_rows,
         invalid_rows,
+        ignored_rows,
         matched_printings,
         unmatched_rows,
         ambiguous_rows,
@@ -522,6 +552,7 @@ fn managed_collections(store: &CollectionStore) -> Result<Vec<ManagedCollectionD
                     name: collection.name().to_owned(),
                     selected: collection.selected(),
                     total_quantity: collection.total_quantity(),
+                    drive_url: collection.drive_url().map(str::to_owned),
                 })
                 .collect()
         })
@@ -555,8 +586,10 @@ async fn write_collection<T: Send + 'static>(
     state: &AppState,
     operation: impl FnOnce(&mut CollectionStore) -> Result<T, String> + Send + 'static,
 ) -> Result<T, String> {
+    let activity = state.update_gate.start_activity()?;
     let writer = Arc::clone(&state.collection_writer);
     tauri::async_runtime::spawn_blocking(move || {
+        let _activity = activity;
         let mut store = writer
             .lock()
             .map_err(|_| "local database lock is poisoned".to_owned())?;
@@ -588,9 +621,10 @@ pub async fn create_collection(
     state: State<'_, AppState>,
     name: String,
     csv: String,
+    source_url: Option<String>,
 ) -> Result<ImportSummaryDto, String> {
     write_collection(&state, move |store| {
-        create_collection_csv(store, &name, &csv)
+        create_collection_csv(store, &name, &csv, source_url.as_deref())
     })
     .await
 }
@@ -599,10 +633,18 @@ pub async fn create_collection(
 pub async fn update_collection(
     state: State<'_, AppState>,
     collection_id: i64,
-    csv: String,
-) -> Result<ImportSummaryDto, String> {
+    name: String,
+    csv: Option<String>,
+    source_url: Option<String>,
+) -> Result<Option<ImportSummaryDto>, String> {
     write_collection(&state, move |store| {
-        update_collection_csv(store, collection_id, &csv)
+        update_collection_csv(
+            store,
+            collection_id,
+            &name,
+            csv.as_deref(),
+            source_url.as_deref(),
+        )
     })
     .await
 }
@@ -616,6 +658,19 @@ pub async fn rename_collection(
     write_collection(&state, move |store| {
         store
             .rename_collection(collection_id, &name)
+            .map_err(|error| error.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn delete_collection(
+    state: State<'_, AppState>,
+    collection_id: i64,
+) -> Result<(), String> {
+    write_collection(&state, move |store| {
+        store
+            .delete_collection(collection_id)
             .map_err(|error| error.to_string())
     })
     .await
@@ -636,11 +691,18 @@ pub async fn set_collection_selected(
 }
 
 #[tauri::command]
-pub async fn download_collection_csv(url: String) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || fetch_collection_csv(&url))
-        .await
-        .map_err(|error| format!("Échec de la tâche de téléchargement : {error}"))?
-        .map_err(|error| error.to_string())
+pub async fn download_collection_csv(
+    state: State<'_, AppState>,
+    url: String,
+) -> Result<String, String> {
+    let activity = state.update_gate.start_activity()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _activity = activity;
+        fetch_collection_csv(&url)
+    })
+    .await
+    .map_err(|error| format!("Échec de la tâche de téléchargement : {error}"))?
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -652,6 +714,7 @@ pub async fn update_reference_data(
     if !valid_local_date(&local_date) {
         return Err("Date locale invalide".to_owned());
     }
+    let activity = state.update_gate.start_activity()?;
     if state
         .reference_update_running
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -669,6 +732,7 @@ pub async fn update_reference_data(
     let update_directory = state.update_directory.clone();
     let running = Arc::clone(&state.reference_update_running);
     tauri::async_runtime::spawn_blocking(move || {
+        let _activity = activity;
         let _guard = ReferenceUpdateGuard(running);
         let mut store = primary_store
             .lock()
@@ -723,9 +787,12 @@ fn refresh_reference_data(
         .map(|collection| collection.id())
         .collect::<Vec<_>>();
     for collection_id in collection_ids {
-        let collection = store
-            .load_collection_by_id(collection_id)
-            .map_err(|error| error.to_string())?;
+        let Some(collection) = store
+            .load_collection_if_present(collection_id)
+            .map_err(|error| error.to_string())?
+        else {
+            continue;
+        };
         let replacement = rematch_collection(collection.clone(), &candidates)
             .map_err(|error| format!("Échec du réappariement : {error}"))?;
         if replacement != collection {
@@ -873,7 +940,8 @@ mod tests {
 
     use super::{
         DashboardQuery, build_dashboard, build_type_analysis, create_collection_csv,
-        import_collection_csv, reference_update_due, update_collection_csv, valid_local_date,
+        import_collection_csv, managed_collections, reference_update_due, update_collection_csv,
+        valid_local_date,
     };
 
     #[test]
@@ -1083,28 +1151,65 @@ mod tests {
     #[test]
     fn col_009_creates_and_replaces_only_the_named_collection() -> Result<(), Box<dyn Error>> {
         let mut store = CollectionStore::in_memory()?;
+        let link = "https://drive.google.com/file/d/fixture-id/view?usp=sharing";
         let summary = create_collection_csv(
             &mut store,
             "Collection de Léa",
             "Quantity,Card Name,Set Code,Card Number\n2,Unknown card,TST,1\n",
+            Some(link),
         )?;
         let friend_id = store.collections()?[0].id();
 
         assert_eq!(summary.total_quantity, 2);
         assert_eq!(store.collections()?.len(), 1);
+        assert_eq!(
+            managed_collections(&store)?[0].drive_url.as_deref(),
+            Some(link)
+        );
         assert_eq!(store.load_collection()?.unresolved()[0].quantity(), 2);
 
-        update_collection_csv(
+        assert!(update_collection_csv(&mut store, friend_id, "Léa", None, None)?.is_none());
+        assert_eq!(store.collections()?[0].name(), "Léa");
+        assert_eq!(store.collections()?[0].drive_url(), Some(link));
+        assert_eq!(store.load_collection()?.unresolved()[0].quantity(), 2);
+
+        let summary = update_collection_csv(
             &mut store,
             friend_id,
-            "Quantity,Card Name,Set Code,Card Number\n4,Replacement,TST,2\n",
-        )?;
+            "Léa – Sorted",
+            Some(
+                "List Type,Collection,Quantity,Card Name,Set Code,Card Number,Language\n\
+                  Folder,mtg,4,Replacement,TST,2,fr\n\
+                  Deck,mtg,20,Replacement,TST,2,\n",
+            ),
+            None,
+        )?
+        .expect("CSV replacement provides a summary");
+        assert_eq!(summary.total_quantity, 4);
+        assert_eq!(summary.ignored_rows, 1);
 
         assert_eq!(
             store.load_collection_by_id(friend_id)?.unresolved()[0].name(),
             "Replacement"
         );
+        assert_eq!(
+            store.load_collection()?.unresolved()[0].language(),
+            Some("French")
+        );
         assert_eq!(store.load_collection()?.unresolved()[0].quantity(), 4);
+        assert_eq!(store.collections()?[0].name(), "Léa – Sorted");
+        assert_eq!(store.collections()?[0].drive_url(), Some(link));
+
+        assert!(update_collection_csv(
+            &mut store,
+            friend_id,
+            "Nom non enregistré",
+            Some("List Type,Collection,Quantity,Card Name,Set Code,Card Number\nDeck,mtg,20,Other,TST,3\n"),
+            Some("https://drive.google.com/file/d/other-id/view"),
+        ).is_err());
+        assert_eq!(store.load_collection()?.unresolved()[0].quantity(), 4);
+        assert_eq!(store.collections()?[0].name(), "Léa – Sorted");
+        assert_eq!(store.collections()?[0].drive_url(), Some(link));
         Ok(())
     }
 

@@ -1,4 +1,5 @@
 mod commands;
+mod updater;
 
 use std::{fs, io, path::Path};
 
@@ -7,6 +8,7 @@ use tauri::Manager;
 
 pub fn run() -> Result<(), tauri::Error> {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let data_directory = app.path().app_local_data_dir()?;
             migrate_legacy_data_directory(&app.path().local_data_dir()?, &data_directory)?;
@@ -20,6 +22,7 @@ pub fn run() -> Result<(), tauri::Error> {
                 data_directory.join("updates"),
                 data_directory.join("card-images"),
             ));
+            app.manage(updater::PendingUpdate::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -30,13 +33,17 @@ pub fn run() -> Result<(), tauri::Error> {
             commands::create_collection,
             commands::update_collection,
             commands::rename_collection,
+            commands::delete_collection,
             commands::set_collection_selected,
             commands::download_collection_csv,
             commands::update_reference_data,
             commands::load_card_image_bytes,
             commands::load_card_localization,
             commands::load_image_cache_stats,
-            commands::clear_image_cache
+            commands::clear_image_cache,
+            updater::app_update_status,
+            updater::check_for_app_update,
+            updater::install_app_update
         ])
         .run(tauri::generate_context!())
 }

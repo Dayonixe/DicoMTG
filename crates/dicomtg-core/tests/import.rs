@@ -1,6 +1,63 @@
 use std::io::Cursor;
 
-use dicomtg_core::{ImportError, RowIssueReason, import_dragonshield_csv};
+use dicomtg_core::{
+    CardCandidate, CardFinish, ImportError, RowIssueReason, build_collection,
+    import_collection_csv, import_dragonshield_csv,
+};
+
+#[test]
+fn imports_sorted_magic_folders_with_language_and_finish() -> Result<(), Box<dyn std::error::Error>>
+{
+    let csv = concat!(
+        "\"sep=,\"\r\n",
+        "List Type,List Name,Collection,Board,Quantity,Card Name,Set Code,Card Number,Printing,Language\r\n",
+        "Folder,Owned,mtg,,1,Counterspell,STA,15,Normal,fr\r\n",
+        "Folder,Owned,mtg,,2,Counterspell,STA,15,Foil,fr\r\n",
+        "Folder,Owned,mtg,,3,Counterspell,STA,15,Normal,en\r\n",
+        "Deck,Sample,mtg,Main Deck,4,Counterspell,STA,15,Normal,\r\n",
+        "Folder,Other,pok,,5,Squirtle,TST,15,Reverse Holo,fr\r\n",
+    );
+    let report = import_collection_csv(csv.as_bytes())?;
+    assert_eq!(report.cards().len(), 3);
+    assert_eq!(report.ignored_rows(), 2);
+    assert_eq!(report.cards()[0].language(), Some("French"));
+    assert_eq!(report.cards()[2].language(), Some("English"));
+    assert!(report.issues().is_empty());
+
+    let candidates = [
+        CardCandidate::with_language("fr-printing", "Counterspell", "STA", "15", "French"),
+        CardCandidate::with_language("en-printing", "Counterspell", "STA", "15", "English"),
+    ];
+    let collection = build_collection(report, &candidates)?;
+    assert!(collection.unresolved().is_empty());
+    let printings = collection
+        .items()
+        .iter()
+        .map(|item| (item.uuid(), item.finish(), item.quantity()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        printings,
+        [
+            ("fr-printing", CardFinish::Normal, 1),
+            ("fr-printing", CardFinish::Foil, 2),
+            ("en-printing", CardFinish::Normal, 3),
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn rejects_sorted_exports_without_any_magic_folder() {
+    let csv = concat!(
+        "List Type,Collection,Quantity,Card Name,Set Code,Card Number\n",
+        "Deck,mtg,1,Counterspell,STA,15\n",
+        "Folder,pok,1,Squirtle,TST,15\n",
+    );
+    assert!(matches!(
+        import_collection_csv(csv.as_bytes()),
+        Err(ImportError::NoSortedMagicFolders)
+    ));
+}
 
 #[test]
 fn col_001_and_col_002_import_dragonshield_rows_and_report_invalid_ones() {

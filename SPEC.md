@@ -5,7 +5,7 @@ Autorité : ce document est la source de vérité du comportement observable de 
 
 ## 1. Objectif
 
-DicoMTG est une application de bureau Windows, locale et utilisable hors ligne après synchronisation. Elle importe une ou plusieurs collections exportées par DragonShield, les apparie au catalogue MTGJSON et reproduit les fonctions d’analyse du rapport Power BI actuel.
+DicoMTG est une application de bureau Windows, locale et utilisable hors ligne après synchronisation. Elle importe une ou plusieurs collections exportées par DragonShield ou Sorted, les apparie au catalogue MTGJSON et reproduit les fonctions d’analyse du rapport Power BI actuel.
 
 L’application doit privilégier l’intégrité des correspondances : une carte non reconnue reste non reconnue plutôt que d’être associée par approximation à une mauvaise impression.
 
@@ -13,7 +13,7 @@ L’application doit privilégier l’intégrité des correspondances : une cart
 
 ### 2.1 MVP
 
-- Importer et nommer plusieurs exports CSV DragonShield comme photographies complètes de collections.
+- Importer et nommer plusieurs exports CSV DragonShield ou Sorted comme photographies complètes de collections.
 - Choisir les collections à fusionner dans toutes les analyses.
 - Mettre à jour et conserver localement le catalogue de cartes.
 - Apparier chaque ligne de collection à une impression canonique quand la correspondance est certaine.
@@ -77,7 +77,9 @@ Chaque ligne importée possède exactement un état :
 
 ### COL-001 — Format accepté
 
-L’import accepte le CSV DragonShield utilisé par le rapport actuel, y compris une première ligne optionnelle `sep=,` ou sa forme exportée avec guillemets `"sep=,"`. Les champs requis sont `Quantity`, `Card Name`, `Set Code` et `Card Number`.
+L’import détecte les exports DragonShield et Sorted, y compris une première ligne optionnelle `sep=,` ou sa forme exportée avec guillemets `"sep=,"`. Les champs requis sont `Quantity`, `Card Name`, `Set Code` et `Card Number`.
+
+Dans un export Sorted, seules les lignes `List Type=Folder` et `Collection=mtg` sont importées. Les autres lignes sont comptées à part dans le résultat. Un export Sorted sans dossier Magic est refusé. Les codes de langue reconnus (par exemple `fr` et `jp`) sont convertis vers les noms utilisés par le catalogue pour l’appariement.
 
 ### COL-002 — Validation
 

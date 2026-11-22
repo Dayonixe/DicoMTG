@@ -1,7 +1,11 @@
 # DicoMTG
 
-DicoMTG est une application Windows de suivi et d'analyse de collections de
-cartes Magic: The Gathering. Ce projet est en version **3.1.0**.
+DicoMTG est une application Windows pour gérer vos collections de cartes
+Magic: The Gathering. Importez vos listes, explorez les cartes que vous
+possédez et suivez la valeur estimée de vos collections. Vos données de
+collection sont conservées sur votre ordinateur.
+
+Version **3.2.0**.
 
 ## Installation
 
@@ -9,41 +13,40 @@ cartes Magic: The Gathering. Ce projet est en version **3.1.0**.
    [dernière release GitHub](https://github.com/Dayonixe/DicoMTG/releases/latest).
 2. Lancez l'installeur. L'installation se fait pour l'utilisateur courant et
    ne nécessite pas les droits administrateur.
-3. Au premier démarrage, ouvrez la page **Données** et lancez **Actualiser**
-   pour installer le catalogue MTGJSON et les prix de référence Cardmarket.
+3. Ouvrez DicoMTG et accédez à **Données** pour importer votre première collection.
 
-L'installeur n'est pas signé. Windows SmartScreen peut donc afficher un
-avertissement. DicoMTG utilise Microsoft Edge WebView2 ; l'installeur télécharge
-son programme d'installation Microsoft si nécessaire.
+Windows SmartScreen peut afficher un avertissement. L’installeur télécharge
+Microsoft Edge WebView2 si nécessaire.
+
+DicoMTG vérifie les mises à jour de l’application au démarrage. Vous pouvez
+aussi cliquer sur **Rechercher des mises à jour** dans **Données**.
 
 ## Importer une collection
 
-La page **Données** importe directement les exports CSV DragonShield :
+Dans **Données**, ajoutez un export CSV DragonShield ou Sorted en utilisant
+l’une des méthodes suivantes.
 
-- depuis le sélecteur de fichiers ;
-- par glisser-déposer ;
-- depuis un lien HTTPS public, notamment un fichier Google Drive partagé.
+- Sélectionnez le fichier sur votre ordinateur.
+- Glissez-déposez le fichier dans la zone d’import.
+- Collez un lien HTTPS public, par exemple vers un fichier Google Drive partagé.
 
-Chaque collection peut être nommée, renommée, remplacée et sélectionnée
-indépendamment. Les collections cochées sont fusionnées dans toutes les vues.
-La ligne `"sep=,"` éventuellement présente dans un export DragonShield est
-prise en charge sans modification du fichier.
+Chaque collection peut être sélectionnée ou supprimée indépendamment. Le
+bouton **Mettre à jour** permet de modifier son nom ou de réimporter ses cartes.
+Les liens Google Drive sont conservés pour les mises à jour. Les collections
+cochées sont fusionnées dans toutes les vues. Pour Sorted, seuls les dossiers
+Magic sont importés. Le bilan d’import indique le nombre de lignes écartées.
 
-Les données de collection et les images mises en cache restent locales. Le
-cache d'images est limité à 250 Mio, supprime automatiquement les fichiers les
-moins récemment utilisés et peut être vidé depuis la page **Données**.
+Le cache d’images est limité à 250 Mio. Vous pouvez voir son occupation et le
+vider depuis **Données**.
 
 ## Fonctionnalités principales
 
-- vue d'ensemble et graphiques interactifs inspirés du rapport Power BI ;
-- analyses par type, mot-clé, extension, rareté, couleur et valeur de mana ;
-- recherche, tri, suggestions et aperçu rapide des cartes ;
-- fiche regroupant les impressions possédées d'une même carte ;
-- prise en charge des cartes recto-verso et du texte français officiel ;
-- valorisation selon les guides quotidiens Cardmarket, avec distinction entre
-  les finitions normales et foil ;
-- sélection et fusion de plusieurs collections ;
-- aide à la construction de deck.
+- Consultez la vue d’ensemble et filtrez votre collection avec les graphiques interactifs.
+- Analysez vos cartes par type, mot-clé, extension, rareté, couleur et valeur de mana.
+- Recherchez, triez et prévisualisez vos cartes, puis exportez la liste filtrée ou complète en CSV.
+- Retrouvez les éditions possédées sur une même fiche, avec les visuels recto-verso et le texte français officiel lorsqu’il est disponible.
+- Suivez la valeur estimée de vos cartes d’après les prix de référence Cardmarket, avec une distinction entre les finitions normales et foil.
+- Utilisez l’aide à la construction de deck pour estimer votre répartition de terrains de base.
 
 La première ouverture de chaque journée actualise les données de référence en
 arrière-plan. Le bouton **Actualiser** permet de forcer cette opération sans

@@ -25,9 +25,12 @@ pub use collection::{
     CardFinish, CollectionBuildError, CollectionSnapshot, OwnedPrinting, UnresolvedCard,
     build_collection, rematch_collection,
 };
-pub use collection_download::{CollectionDownloadError, download_collection_csv};
+pub use collection_download::{
+    CollectionDownloadError, download_collection_csv, google_drive_source_url,
+};
+pub use collection_import::import_collection_csv as import_dragonshield_csv;
 pub use collection_import::{
-    ImportError, ImportIssue, ImportReport, ImportedCard, RowIssueReason, import_dragonshield_csv,
+    ImportError, ImportIssue, ImportReport, ImportedCard, RowIssueReason, import_collection_csv,
 };
 pub use collection_query::{
     CollectionItemStatus, CollectionListItem, CollectionQuery, CollectionQueryError,

@@ -43,6 +43,7 @@ import {
 } from "./sorting.js";
 import { manaSymbolParts } from "./mana-symbols.js";
 import { calculateBasicLands, DECK_COLOR_CODES } from "./deck-builder.js";
+import { setupAppUpdater } from "./app-updater.js";
 
 const form = document.querySelector("#filters");
 const collectionSearch = document.querySelector("#search");
@@ -222,6 +223,7 @@ const virtualTables = new WeakMap();
 const tableExportButtons = new WeakMap();
 let managedCollections = [];
 let collectionUpdateTarget;
+let importInProgress = false;
 let selectedImportFile;
 const pageElements = new Map(
   PAGE_IDS.map((page) => [page, document.querySelector(`[data-page="${page}"]`)]),
@@ -330,14 +332,14 @@ function setLoading(loading) {
   setTableExportAvailable(rows, !loading && virtualTables.has(rows));
 }
 
-function setImportLoading(loading) {
+function setImportLoading(loading, reimport = false) {
   importButton.disabled = loading;
   fileInput.disabled = loading;
   collectionUrlInput.disabled = loading;
-  collectionNameInput.disabled = loading || Boolean(collectionUpdateTarget);
+  collectionNameInput.disabled = loading;
   cancelCollectionUpdateButton.disabled = loading;
   importButton.textContent = loading
-    ? "Import en cours…"
+    ? (reimport ? "Import en cours…" : "Enregistrement…")
     : collectionUpdateTarget
       ? "Mettre à jour"
       : "Ajouter";
@@ -1687,7 +1689,7 @@ function resetImportSource() {
 }
 
 function selectImportFile(file) {
-  if (!file) return;
+  if (!file || importButton.disabled) return;
   selectedImportFile = file;
   collectionUrlInput.value = "";
   collectionFileStatus.textContent = file.name;
@@ -1702,12 +1704,13 @@ function setCollectionImportMode(collection) {
   collectionNameInput.value = collection?.name ?? "";
   cancelCollectionUpdateButton.hidden = !collection;
   resetImportSource();
+  collectionUrlInput.value = collection?.driveUrl ?? "";
   clearImportError();
   importResult.hidden = true;
   setImportLoading(false);
   if (collection) {
     importTitle.scrollIntoView({ block: "center" });
-    fileInput.focus();
+    collectionNameInput.focus();
   }
 }
 
@@ -1753,13 +1756,13 @@ function renderManagedCollections() {
 
     const actions = document.createElement("div");
     actions.className = "managed-collection-actions";
-    const rename = document.createElement("button");
-    rename.type = "button";
-    rename.textContent = "Renommer";
     const update = document.createElement("button");
     update.type = "button";
     update.textContent = "Mettre à jour";
-    actions.append(rename, update);
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.textContent = "Supprimer";
+    actions.append(update, remove);
     row.append(choice, actions);
     managedCollectionsList.append(row);
 
@@ -1783,31 +1786,32 @@ function renderManagedCollections() {
       }
     });
 
-    rename.addEventListener("click", async () => {
-      const value = window.prompt("Nouveau nom de la collection", collection.name);
-      if (value === null || value.trim() === collection.name) return;
-      rename.disabled = true;
+    remove.addEventListener("click", async () => {
+      if (importButton.disabled || !window.confirm(
+        `Supprimer définitivement « ${collection.name} » et ses cartes importées de DicoMTG ?`,
+      )) return;
+      remove.disabled = update.disabled = checkbox.disabled = true;
       clearManagedCollectionsError();
       try {
         if (!invoke) throw new Error("L’interface doit être ouverte depuis l’application DicoMTG.");
-        await invoke("rename_collection", {
-          collectionId: collection.id,
-          name: value.trim(),
-        });
+        await invoke("delete_collection", { collectionId: collection.id });
+        collectionSnapshotCurrent = false;
         if (collectionUpdateTarget?.id === collection.id) {
-          collectionUpdateTarget = { ...collectionUpdateTarget, name: value.trim() };
-          importTitle.textContent = `Mettre à jour « ${value.trim()} »`;
-          collectionNameInput.value = value.trim();
+          setCollectionImportMode(undefined);
         }
+        managedCollectionsStatus.textContent = `Collection « ${collection.name} » supprimée.`;
         await loadManagedCollections();
+        await loadDashboard(true);
       } catch (error) {
         showManagedCollectionsError(String(error));
       } finally {
-        rename.disabled = false;
+        remove.disabled = update.disabled = checkbox.disabled = false;
       }
     });
 
-    update.addEventListener("click", () => setCollectionImportMode(collection));
+    update.addEventListener("click", () => {
+      if (!importButton.disabled) setCollectionImportMode(collection);
+    });
   }
 }
 
@@ -2017,42 +2021,52 @@ cancelCollectionUpdateButton.addEventListener("click", () => {
 
 importForm.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (importInProgress || appUpdater.installing || importButton.disabled) return;
   clearImportError();
   importResult.hidden = true;
   const name = collectionNameInput.value.trim();
+  const target = collectionUpdateTarget;
+  const file = selectedImportFile;
   const url = collectionUrlInput.value.trim();
-  if (!collectionUpdateTarget && !name) {
+  const reimport = Boolean(file || url);
+  if (!name) {
     showImportError("Donnez un nom à la collection.");
     collectionNameInput.focus();
     return;
   }
-  if (!selectedImportFile && !url) {
-    showImportError("Choisissez, déposez ou indiquez un export CSV DragonShield.");
+  if (!target && !reimport) {
+    showImportError("Choisissez, déposez ou indiquez un export CSV DragonShield ou Sorted.");
     return;
   }
 
-  setImportLoading(true);
-  statusRegion.textContent = "Import de la collection";
+  importInProgress = true;
+  setImportLoading(true, reimport);
+  statusRegion.textContent = reimport ? "Import de la collection" : "Enregistrement du nom";
   try {
     if (!invoke) throw new Error("L’interface doit être ouverte depuis l’application DicoMTG.");
-    const csv = selectedImportFile
-      ? await selectedImportFile.text()
-      : await invoke("download_collection_csv", { url });
-    const summary = collectionUpdateTarget
+    const sourceUrl = reimport && !file ? url : null;
+    const csv = reimport ? (file ? await file.text() : await invoke("download_collection_csv", { url })) : null;
+    const summary = target
       ? await invoke("update_collection", {
-          collectionId: collectionUpdateTarget.id,
-          csv,
+          collectionId: target.id,
+          name, csv, sourceUrl,
         })
-      : await invoke("create_collection", { name, csv });
-    collectionSnapshotCurrent = false;
-    renderImportResult(summary);
-    setCollectionImportMode(undefined);
-    importResult.hidden = false;
+      : await invoke("create_collection", { name, csv, sourceUrl });
+    if (summary) collectionSnapshotCurrent = false;
     await loadManagedCollections();
-    if (await loadDashboard(true)) statusRegion.textContent = "Import terminé";
+    const refreshed = !summary || await loadDashboard(true);
+    setCollectionImportMode(undefined);
+    if (summary) renderImportResult(summary);
+    else {
+      importSummary.textContent = `Nom enregistré : « ${name} ».`;
+      importIssues.hidden = true;
+    }
+    importResult.hidden = false;
+    if (refreshed) statusRegion.textContent = summary ? "Import terminé" : "Nom enregistré";
   } catch (error) {
     showImportError(String(error));
   } finally {
+    importInProgress = false;
     setImportLoading(false);
   }
 });
@@ -2066,6 +2080,7 @@ function todayLocalIso() {
 }
 
 async function refreshReferenceData(force) {
+  if (appUpdater.installing || referenceButton.disabled) return;
   clearReferenceError();
   referenceResult.hidden = true;
   setReferenceLoading(true);
@@ -2144,6 +2159,8 @@ renderDeckBuilder();
 routeFromLocation();
 setCollectionImportMode(undefined);
 loadManagedCollections();
+const appUpdater = setupAppUpdater(window.__TAURI__?.core, () => importInProgress || referenceButton.disabled);
 loadDashboard(true).then((loaded) => {
   if (loaded) refreshReferenceData(false);
+  void appUpdater.check();
 });

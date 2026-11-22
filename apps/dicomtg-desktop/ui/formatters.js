@@ -130,6 +130,11 @@ export function formatImportSummary(summary) {
       `${formatCount(summary.invalidRows)} ligne${summary.invalidRows > 1 ? "s" : ""} invalide${summary.invalidRows > 1 ? "s" : ""}`,
     );
   }
+  if (summary.ignoredRows > 0) {
+    parts.push(
+      `${formatCount(summary.ignoredRows)} ligne${summary.ignoredRows > 1 ? "s" : ""} hors des dossiers Magic ignorée${summary.ignoredRows > 1 ? "s" : ""}`,
+    );
+  }
   return parts.join(" · ");
 }
 

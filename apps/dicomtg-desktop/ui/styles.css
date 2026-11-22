@@ -230,6 +230,11 @@ main {
   background: linear-gradient(135deg, #151d24, var(--surface));
 }
 
+#app-update-notes {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .reference-layout {
   display: grid;
   grid-template-columns: minmax(18rem, 1fr) auto auto;

@@ -50,6 +50,13 @@ impl From<FromUtf8Error> for CollectionDownloadError {
     }
 }
 
+pub fn google_drive_source_url(source_url: &str) -> Result<Option<&str>, CollectionDownloadError> {
+    let download = collection_download_url(source_url)?;
+    Ok(download
+        .starts_with("https://drive.usercontent.google.com/")
+        .then(|| source_url.trim()))
+}
+
 pub fn download_collection_csv(source_url: &str) -> Result<String, CollectionDownloadError> {
     let url = collection_download_url(source_url)?;
     let agent = Agent::new_with_config(
@@ -139,7 +146,7 @@ mod tests {
 
     use super::{
         CollectionDownloadError, MAX_COLLECTION_CSV_BYTES, collection_download_url,
-        read_collection_csv,
+        google_drive_source_url, read_collection_csv,
     };
 
     #[test]
@@ -153,6 +160,22 @@ mod tests {
             collection_download_url("https://drive.google.com/open?id=1AbC_def-23").unwrap(),
             "https://drive.usercontent.google.com/download?id=1AbC_def-23&export=download&confirm=t"
         );
+    }
+
+    #[test]
+    fn remembers_the_original_link_only_for_google_drive() {
+        let link = "https://drive.google.com/file/d/1AbC_def/view?usp=sharing";
+        assert_eq!(google_drive_source_url(link).unwrap(), Some(link));
+        assert_eq!(
+            google_drive_source_url("https://example.test/cards.csv").unwrap(),
+            None
+        );
+        assert_eq!(
+            google_drive_source_url("https://drive.google.com.example.test/file/d/1AbC_def/view")
+                .unwrap(),
+            None
+        );
+        assert!(google_drive_source_url("https://drive.google.com/unsupported").is_err());
     }
 
     #[test]

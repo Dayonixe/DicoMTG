@@ -79,6 +79,7 @@ impl ImportIssue {
 pub struct ImportReport {
     cards: Vec<ImportedCard>,
     issues: Vec<ImportIssue>,
+    ignored_rows: usize,
 }
 
 impl ImportReport {
@@ -92,6 +93,11 @@ impl ImportReport {
         &self.issues
     }
 
+    #[must_use]
+    pub fn ignored_rows(&self) -> usize {
+        self.ignored_rows
+    }
+
     pub(crate) fn into_parts(self) -> (Vec<ImportedCard>, Vec<ImportIssue>) {
         (self.cards, self.issues)
     }
@@ -102,6 +108,7 @@ pub enum ImportError {
     Io(std::io::Error),
     Csv(csv::Error),
     MissingHeaders { names: Vec<String> },
+    NoSortedMagicFolders,
 }
 
 impl fmt::Display for ImportError {
@@ -112,6 +119,7 @@ impl fmt::Display for ImportError {
             Self::MissingHeaders { names } => {
                 write!(formatter, "missing required headers: {}", names.join(", "))
             }
+            Self::NoSortedMagicFolders => write!(formatter, "no Magic cards in Sorted folders"),
         }
     }
 }
@@ -121,7 +129,7 @@ impl Error for ImportError {
         match self {
             Self::Io(error) => Some(error),
             Self::Csv(error) => Some(error),
-            Self::MissingHeaders { .. } => None,
+            Self::MissingHeaders { .. } | Self::NoSortedMagicFolders => None,
         }
     }
 }
@@ -138,7 +146,7 @@ impl From<csv::Error> for ImportError {
     }
 }
 
-pub fn import_dragonshield_csv(mut source: impl Read) -> Result<ImportReport, ImportError> {
+pub fn import_collection_csv(mut source: impl Read) -> Result<ImportReport, ImportError> {
     let mut bytes = Vec::new();
     source.read_to_end(&mut bytes)?;
     let (csv, line_offset) = csv_body(&bytes);
@@ -146,9 +154,23 @@ pub fn import_dragonshield_csv(mut source: impl Read) -> Result<ImportReport, Im
     let indices = HeaderIndices::new(reader.headers()?)?;
     let mut cards = Vec::new();
     let mut issues = Vec::new();
+    let mut ignored_rows = 0;
 
     for result in reader.records() {
         let record = result?;
+        if indices.sorted.is_some_and(|(list_type, game)| {
+            !record
+                .get(list_type)
+                .unwrap_or_default()
+                .eq_ignore_ascii_case("Folder")
+                || !record
+                    .get(game)
+                    .unwrap_or_default()
+                    .eq_ignore_ascii_case("mtg")
+        }) {
+            ignored_rows += 1;
+            continue;
+        }
         let line = record
             .position()
             .map_or(0, |position| position.line() as usize + line_offset);
@@ -158,7 +180,14 @@ pub fn import_dragonshield_csv(mut source: impl Read) -> Result<ImportReport, Im
         }
     }
 
-    Ok(ImportReport { cards, issues })
+    if indices.sorted.is_some() && cards.is_empty() && issues.is_empty() {
+        return Err(ImportError::NoSortedMagicFolders);
+    }
+    Ok(ImportReport {
+        cards,
+        issues,
+        ignored_rows,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -169,6 +198,7 @@ struct HeaderIndices {
     collector_number: usize,
     language: Option<usize>,
     printing: Option<usize>,
+    sorted: Option<(usize, usize)>,
 }
 
 impl HeaderIndices {
@@ -190,6 +220,17 @@ impl HeaderIndices {
             collector_number: header_position(headers, "Card Number")?,
             language: headers.iter().position(|header| header == "Language"),
             printing: headers.iter().position(|header| header == "Printing"),
+            sorted: if headers
+                .iter()
+                .any(|header| matches!(header, "List Type" | "Collection"))
+            {
+                Some((
+                    header_position(headers, "List Type")?,
+                    header_position(headers, "Collection")?,
+                ))
+            } else {
+                None
+            },
         })
     }
 }
@@ -216,6 +257,11 @@ fn parse_record(
         .language
         .and_then(|index| record.get(index))
         .filter(|value| !value.is_empty());
+    let language = if indices.sorted.is_some() {
+        language.map(sorted_language)
+    } else {
+        language
+    };
     let printing = indices
         .printing
         .and_then(|index| record.get(index))
@@ -241,6 +287,21 @@ fn parse_record(
             printing,
         ),
     })
+}
+
+fn sorted_language(code: &str) -> &str {
+    match code.to_ascii_lowercase().as_str() {
+        "en" => "English",
+        "fr" => "French",
+        "de" => "German",
+        "es" => "Spanish",
+        "it" => "Italian",
+        "pt" => "Portuguese",
+        "ja" | "jp" => "Japanese",
+        "ko" => "Korean",
+        "ru" => "Russian",
+        _ => code,
+    }
 }
 
 fn required_field<'a>(

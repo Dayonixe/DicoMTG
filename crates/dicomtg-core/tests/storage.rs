@@ -21,6 +21,51 @@ fn col_009_new_store_starts_without_collection() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn named_collection_retains_drive_link_and_cards_when_renamed() -> Result<(), Box<dyn Error>> {
+    let path = temporary_database_path()?;
+    let original = diagnostic_collection()?;
+    let link = "https://drive.google.com/file/d/fixture-id/view";
+    let mut store = CollectionStore::open(&path)?;
+    let id = store.create_collection_with_drive_url("Original", &original, Some(link))?;
+    store.update_named_collection(id, "Renommée", None, None)?;
+    drop(store);
+
+    let store = CollectionStore::open(&path)?;
+    assert_eq!(store.collections()?[0].name(), "Renommée");
+    assert_eq!(store.collections()?[0].drive_url(), Some(link));
+    assert_eq!(store.load_collection_by_id(id)?, original);
+    drop(store);
+    fs::remove_file(path)?;
+    Ok(())
+}
+
+#[test]
+fn deletion_is_scoped_and_deleted_ids_cannot_target_another_collection()
+-> Result<(), Box<dyn Error>> {
+    let mut store = CollectionStore::in_memory()?;
+    let removed = diagnostic_collection()?;
+    let kept = matched_collection("abrade", "Abrade", "DOM", "117")?;
+    let kept_id = store.create_collection("Keep", &kept)?;
+    let removed_id = store.create_collection("Remove", &removed)?;
+
+    store.delete_collection(removed_id)?;
+    assert_eq!(store.load_collection()?, kept);
+    assert_eq!(store.collections()?[0].id(), kept_id);
+    assert!(store.load_collection_if_present(removed_id)?.is_none());
+    assert!(!store.replace_collection_if_unchanged(removed_id, &removed, &kept)?);
+
+    let new_id = store.create_collection("Remove", &kept)?;
+    assert_ne!(new_id, removed_id);
+    assert!(
+        store
+            .update_named_collection(removed_id, "Stale", None, Some(&removed))
+            .is_err()
+    );
+    assert_eq!(store.load_collection_by_id(new_id)?, kept);
+    Ok(())
+}
+
+#[test]
 fn col_006_replace_is_idempotent_and_round_trips_diagnostics() -> Result<(), Box<dyn Error>> {
     let mut store = CollectionStore::in_memory()?;
     let collection = diagnostic_collection()?;
@@ -52,6 +97,19 @@ fn col_006_failed_replace_keeps_the_previous_collection() -> Result<(), Box<dyn 
 
     let replacement = matched_collection("blocked", "Opt", "DOM", "60")?;
     assert!(store.replace_collection(&replacement).is_err());
+    let id = store.collections()?[0].id();
+    assert!(
+        store
+            .update_named_collection(
+                id,
+                "Renamed",
+                Some(Some("https://drive.google.com/open?id=abc")),
+                Some(&replacement),
+            )
+            .is_err()
+    );
+    assert_eq!(store.collections()?[0].name(), "Ma collection");
+    assert_eq!(store.collections()?[0].drive_url(), None);
     assert_eq!(store.load_collection()?, initial);
 
     drop(store);
@@ -216,6 +274,7 @@ fn col_004_migrates_an_existing_v3_database_without_losing_collection_prices_or_
     assert_eq!(store.collections()?.len(), 1);
     assert_eq!(store.collections()?[0].name(), "Ma collection");
     assert!(store.collections()?[0].selected());
+    assert_eq!(store.collections()?[0].drive_url(), None);
     assert_eq!(collection.items().len(), 1);
     assert_eq!(collection.items()[0].uuid(), "owned");
     assert_eq!(collection.items()[0].finish(), CardFinish::Normal);

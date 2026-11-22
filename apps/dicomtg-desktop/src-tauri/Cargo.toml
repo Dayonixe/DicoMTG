@@ -1,6 +1,6 @@
 [package]
 name = "dicomtg-desktop"
-version = "3.1.0"
+version = "3.2.0"
 edition = "2024"
 publish = false
 build = "build.rs"
@@ -12,7 +12,9 @@ crate-type = ["rlib"]
 [dependencies]
 dicomtg-core = { path = "../../../crates/dicomtg-core" }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tauri = { version = "2", features = [] }
+tauri-plugin-updater = { version = "2", default-features = false, features = ["rustls-tls", "system-proxy"] }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

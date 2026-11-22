@@ -127,6 +127,13 @@ test("summarizes a collection import without hiding invalid rows", () => {
   );
 });
 
+test("reports Sorted rows outside Magic folders separately", () => {
+  assert.equal(
+    formatImportSummary({ totalQuantity: 4, matchedPrintings: 1, ignoredRows: 2 }),
+    "4 cartes importées · 1 impression appariée · 2 lignes hors des dossiers Magic ignorées",
+  );
+});
+
 test("summarizes installed reference data", () => {
   assert.equal(
     formatReferenceUpdate({

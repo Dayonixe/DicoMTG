@@ -43,6 +43,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         9,
         include_str!("../migrations/0009_named_collections.up.sql"),
     ),
+    (
+        10,
+        include_str!("../migrations/0010_collection_drive_urls.up.sql"),
+    ),
 ];
 
 const SELECTED_PRINTING_UUIDS: &str = "SELECT items.uuid FROM collections
@@ -63,6 +67,7 @@ pub struct StoredCollection {
     name: String,
     selected: bool,
     total_quantity: u64,
+    drive_url: Option<String>,
 }
 
 impl StoredCollection {
@@ -84,6 +89,11 @@ impl StoredCollection {
     #[must_use]
     pub fn total_quantity(&self) -> u64 {
         self.total_quantity
+    }
+
+    #[must_use]
+    pub fn drive_url(&self) -> Option<&str> {
+        self.drive_url.as_deref()
     }
 }
 
@@ -145,12 +155,22 @@ impl CollectionStore {
         collection: &CollectionSnapshot,
     ) -> Result<(), StorageError> {
         let (_writer, transaction) = self.begin_write()?;
-        transaction.execute(
-            "INSERT OR IGNORE INTO collections (id, name, selected) VALUES (1, 'Ma collection', 1)",
+        let existing = transaction.query_row(
+            "SELECT id FROM collections WHERE id = 1 OR name = 'Ma collection' ORDER BY id LIMIT 1",
             [],
-        )?;
-        ensure_collection_exists(&transaction, 1)?;
-        replace_collection_in_transaction(&transaction, 1, collection)?;
+            |row| row.get(0),
+        ).optional()?;
+        let id = if let Some(id) = existing {
+            id
+        } else {
+            let id = next_collection_id(&transaction)?;
+            transaction.execute(
+                "INSERT INTO collections (id, name, selected) VALUES (?1, 'Ma collection', 1)",
+                [id],
+            )?;
+            id
+        };
+        replace_collection_in_transaction(&transaction, id, collection)?;
         transaction.commit()?;
         Ok(())
     }
@@ -160,14 +180,23 @@ impl CollectionStore {
         name: &str,
         collection: &CollectionSnapshot,
     ) -> Result<i64, StorageError> {
+        self.create_collection_with_drive_url(name, collection, None)
+    }
+
+    pub fn create_collection_with_drive_url(
+        &mut self,
+        name: &str,
+        collection: &CollectionSnapshot,
+        drive_url: Option<&str>,
+    ) -> Result<i64, StorageError> {
         let name = valid_collection_name(name)?;
         let (_writer, transaction) = self.begin_write()?;
         ensure_unique_collection_name(&transaction, name, None)?;
+        let id = next_collection_id(&transaction)?;
         transaction.execute(
-            "INSERT INTO collections (name, selected) VALUES (?1, 1)",
-            [name],
+            "INSERT INTO collections (id, name, selected, drive_url) VALUES (?1, ?2, 1, ?3)",
+            params![id, name, drive_url],
         )?;
-        let id = transaction.last_insert_rowid();
         replace_collection_in_transaction(&transaction, id, collection)?;
         transaction.commit()?;
         Ok(id)
@@ -192,8 +221,9 @@ impl CollectionStore {
         replacement: &CollectionSnapshot,
     ) -> Result<bool, StorageError> {
         let (_writer, transaction) = self.begin_write()?;
-        ensure_collection_exists(&transaction, collection_id)?;
-        if self.load_collection_rows(collection_id)? != *expected {
+        if !collection_exists(&transaction, collection_id)?
+            || self.load_collection_rows(collection_id)? != *expected
+        {
             return Ok(false);
         }
         replace_collection_in_transaction(&transaction, collection_id, replacement)?;
@@ -206,14 +236,48 @@ impl CollectionStore {
         collection_id: i64,
         name: &str,
     ) -> Result<(), StorageError> {
+        self.update_named_collection(collection_id, name, None, None)
+    }
+
+    pub fn update_named_collection(
+        &mut self,
+        collection_id: i64,
+        name: &str,
+        drive_url: Option<Option<&str>>,
+        collection: Option<&CollectionSnapshot>,
+    ) -> Result<(), StorageError> {
         let name = valid_collection_name(name)?;
         let (_writer, transaction) = self.begin_write()?;
         ensure_collection_exists(&transaction, collection_id)?;
         ensure_unique_collection_name(&transaction, name, Some(collection_id))?;
         transaction.execute(
-            "UPDATE collections SET name = ?1 WHERE id = ?2",
-            params![name, collection_id],
+            "UPDATE collections
+             SET name = ?1, drive_url = CASE WHEN ?2 THEN ?3 ELSE drive_url END
+             WHERE id = ?4",
+            params![
+                name,
+                drive_url.is_some(),
+                drive_url.flatten(),
+                collection_id
+            ],
         )?;
+        if let Some(collection) = collection {
+            replace_collection_in_transaction(&transaction, collection_id, collection)?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn delete_collection(&mut self, collection_id: i64) -> Result<(), StorageError> {
+        let (_writer, transaction) = self.begin_write()?;
+        ensure_collection_exists(&transaction, collection_id)?;
+        // Keep deleted IDs reserved so an in-flight import cannot overwrite a new collection.
+        transaction.execute(
+            "INSERT INTO collection_id_sequence (singleton, last_id) VALUES (1, ?1)
+             ON CONFLICT(singleton) DO UPDATE SET last_id = MAX(last_id, excluded.last_id)",
+            [collection_id],
+        )?;
+        transaction.execute("DELETE FROM collections WHERE id = ?1", [collection_id])?;
         transaction.commit()?;
         Ok(())
     }
@@ -239,7 +303,8 @@ impl CollectionStore {
     pub fn collections(&self) -> Result<Vec<StoredCollection>, StorageError> {
         let mut statement = self.connection.prepare(
             "SELECT collections.id, collections.name, collections.selected,
-                    COALESCE(items.quantity, 0) + COALESCE(unresolved.quantity, 0)
+                    COALESCE(items.quantity, 0) + COALESCE(unresolved.quantity, 0),
+                    collections.drive_url
              FROM collections
              LEFT JOIN (
                  SELECT collection_id, SUM(quantity) AS quantity
@@ -263,6 +328,7 @@ impl CollectionStore {
                 name: row.get(1)?,
                 selected: row.get::<_, i64>(2)? != 0,
                 total_quantity,
+                drive_url: row.get(4)?,
             });
         }
         Ok(collections)
@@ -272,9 +338,22 @@ impl CollectionStore {
         &self,
         collection_id: i64,
     ) -> Result<CollectionSnapshot, StorageError> {
+        self.load_collection_if_present(collection_id)?
+            .ok_or_else(|| {
+                StorageError::InvalidData(format!("unknown collection: {collection_id}"))
+            })
+    }
+
+    pub fn load_collection_if_present(
+        &self,
+        collection_id: i64,
+    ) -> Result<Option<CollectionSnapshot>, StorageError> {
         let transaction = self.connection.unchecked_transaction()?;
-        ensure_collection_exists(&transaction, collection_id)?;
-        let collection = self.load_collection_rows(collection_id)?;
+        let collection = if collection_exists(&transaction, collection_id)? {
+            Some(self.load_collection_rows(collection_id)?)
+        } else {
+            None
+        };
         transaction.commit()?;
         Ok(collection)
     }
@@ -774,17 +853,31 @@ fn ensure_collection_exists(
     connection: &Connection,
     collection_id: i64,
 ) -> Result<(), StorageError> {
-    let exists = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM collections WHERE id = ?1)",
-        [collection_id],
-        |row| row.get::<_, bool>(0),
-    )?;
-    if !exists {
+    if !collection_exists(connection, collection_id)? {
         return Err(StorageError::InvalidData(format!(
             "unknown collection: {collection_id}"
         )));
     }
     Ok(())
+}
+
+fn collection_exists(connection: &Connection, id: i64) -> Result<bool, StorageError> {
+    Ok(connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM collections WHERE id = ?1)",
+        [id],
+        |row| row.get(0),
+    )?)
+}
+
+fn next_collection_id(connection: &Connection) -> Result<i64, StorageError> {
+    Ok(connection.query_row(
+        "INSERT INTO collection_id_sequence (singleton, last_id)
+         VALUES (1, COALESCE((SELECT MAX(id) FROM collections), 0) + 1)
+         ON CONFLICT(singleton) DO UPDATE SET last_id = MAX(last_id + 1, excluded.last_id)
+         RETURNING last_id",
+        [],
+        |row| row.get(0),
+    )?)
 }
 
 fn ensure_unique_collection_name(

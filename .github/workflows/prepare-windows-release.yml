@@ -1,0 +1,121 @@
+name: Préparer la release Windows
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+    inputs:
+      release_notes:
+        description: Notes de publication à afficher dans DicoMTG
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    if: github.repository == 'Dayonixe/DicoMTG' && (github.event_name != 'push' || !github.event.deleted)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Vérifier le tag de release
+        id: release
+        shell: pwsh
+        run: |
+          $config = Get-Content apps/dicomtg-desktop/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          $version = $config.version
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Version Windows invalide" }
+          $tag = "v$version"
+          if ($env:GITHUB_EVENT_NAME -eq 'push' -and $env:GITHUB_REF_NAME -cne $tag) {
+            throw "Le tag poussé doit être $tag pour cette version."
+          }
+          $tagCommit = git rev-parse "refs/tags/${tag}^{commit}"
+          if ($LASTEXITCODE -ne 0 -or $tagCommit -ne (git rev-parse HEAD)) {
+            throw "Le tag $tag doit pointer vers le commit sélectionné pour cette exécution."
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24"
+
+      - name: Installer le CLI Tauri
+        run: npm ci --prefix apps/dicomtg-desktop
+
+      - name: Préparer la configuration de signature
+        shell: pwsh
+        env:
+          UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:UPDATER_PUBLIC_KEY)) {
+            throw "Configurez la variable GitHub TAURI_UPDATER_PUBLIC_KEY."
+          }
+          @{
+            bundle = @{ createUpdaterArtifacts = $true }
+            plugins = @{ updater = @{ pubkey = $env:UPDATER_PUBLIC_KEY.Trim() } }
+          } | ConvertTo-Json -Depth 5 |
+            Set-Content (Join-Path $env:RUNNER_TEMP "tauri-signing.json") -Encoding utf8NoBOM
+
+      - name: Générer et signer l’installeur NSIS
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            throw "Configurez le secret GitHub TAURI_SIGNING_PRIVATE_KEY."
+          }
+          $configPath = Join-Path $env:RUNNER_TEMP "tauri-signing.json"
+          npm run bundle:windows --prefix apps/dicomtg-desktop -- --config "$configPath" -- --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Préparer le manifeste
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_NOTES: ${{ inputs.release_notes }}
+        run: |
+          $version = $env:RELEASE_VERSION
+          $notes = $env:RELEASE_NOTES
+          if ([string]::IsNullOrWhiteSpace($notes)) {
+            [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+            $tagRef = "refs/tags/v$version"
+            if ((git cat-file -t $tagRef) -eq 'tag') {
+              $notes = ((git for-each-ref --format='%(contents)' $tagRef) -join "`n").TrimEnd()
+              $tagSignature = ((git for-each-ref --format='%(contents:signature)' $tagRef) -join "`n").TrimEnd()
+              if ($tagSignature -and $notes.EndsWith($tagSignature, [StringComparison]::Ordinal)) {
+                $notes = $notes.Substring(0, $notes.Length - $tagSignature.Length).TrimEnd()
+              }
+            }
+          }
+          $file = "DicoMTG_${version}_x64-setup.exe"
+          $bundle = "target/release/bundle/nsis"
+          $signature = (Get-Content (Join-Path $bundle "$file.sig") -Raw).Trim()
+          if (!$signature) { throw "La signature de l’installeur est vide." }
+          $output = Join-Path $env:RUNNER_TEMP "signed-release"
+          New-Item -ItemType Directory -Path $output | Out-Null
+          Copy-Item -LiteralPath (Join-Path $bundle $file), (Join-Path $bundle "$file.sig") -Destination $output
+          @{
+            version = $version
+            notes = $notes
+            pub_date = [DateTimeOffset]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ss'Z'")
+            platforms = @{
+              "windows-x86_64" = @{
+                signature = $signature
+                url = "https://github.com/Dayonixe/DicoMTG/releases/download/v$version/$file"
+              }
+            }
+          } | ConvertTo-Json -Depth 4 |
+            Set-Content (Join-Path $output "latest.json") -Encoding utf8NoBOM
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: DicoMTG-v${{ steps.release.outputs.version }}-Windows
+          path: ${{ runner.temp }}/signed-release
+          if-no-files-found: error
