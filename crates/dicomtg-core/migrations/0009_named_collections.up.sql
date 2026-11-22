@@ -4,7 +4,11 @@ CREATE TABLE collections (
     selected INTEGER NOT NULL DEFAULT 1 CHECK (selected IN (0, 1))
 );
 
-INSERT INTO collections (id, name, selected) VALUES (1, 'Ma collection', 1);
+INSERT INTO collections (id, name, selected)
+SELECT 1, 'Ma collection', 1
+WHERE EXISTS (SELECT 1 FROM collection_items)
+   OR EXISTS (SELECT 1 FROM unresolved_cards)
+   OR EXISTS (SELECT 1 FROM import_issues);
 
 ALTER TABLE collection_items RENAME TO collection_items_v8;
 

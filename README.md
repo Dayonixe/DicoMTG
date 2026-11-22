@@ -1,11 +1,11 @@
 # DicoMTG
 
 DicoMTG est une application Windows de suivi et d'analyse de collections de
-cartes Magic: The Gathering. La version stable actuelle est la **3.0.0**.
+cartes Magic: The Gathering. Ce projet est en version **3.1.0**.
 
 ## Installation
 
-1. Téléchargez `DicoMTG_3.0.0_x64-setup.exe` depuis la
+1. Téléchargez l’installeur Windows `DicoMTG_<version>_x64-setup.exe` depuis la
    [dernière release GitHub](https://github.com/Dayonixe/DicoMTG/releases/latest).
 2. Lancez l'installeur. L'installation se fait pour l'utilisateur courant et
    ne nécessite pas les droits administrateur.

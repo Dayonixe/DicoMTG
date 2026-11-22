@@ -20,6 +20,17 @@ export const DEFAULT_CARD_SORT = Object.freeze({
   direction: "ascending",
 });
 
+export const COLLECTION_ROW_HEIGHT = 44;
+
+export function visibleCardRows(count, bodyTop, viewportHeight) {
+  const first = Math.max(0, Math.min(count - 1, Math.floor(-bodyTop / COLLECTION_ROW_HEIGHT)));
+  const pastLast = Math.ceil((viewportHeight - bodyTop) / COLLECTION_ROW_HEIGHT);
+  return {
+    start: Math.max(0, first - 6),
+    end: Math.min(count, Math.max(first + 1, pastLast) + 6),
+  };
+}
+
 export function nextCardSort(current, key) {
   return {
     key,

@@ -13,9 +13,10 @@ pub fn run() -> Result<(), tauri::Error> {
             fs::create_dir_all(&data_directory)?;
             let database_path = data_directory.join("dicomtg.sqlite");
             let store = CollectionStore::open(&database_path)?;
+            let collection_writer = store.open_peer()?;
             app.manage(commands::AppState::new(
                 store,
-                database_path,
+                collection_writer,
                 data_directory.join("updates"),
                 data_directory.join("card-images"),
             ));

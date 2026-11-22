@@ -37,6 +37,8 @@ export function findCardsByName(cards, search) {
   return cards.filter((card) => normalized(card.name) === name);
 }
 
+const printingCollator = new Intl.Collator("fr", { numeric: true, sensitivity: "base" });
+
 export function groupCardPrintings(cards) {
   const printings = new Map();
   for (const card of cards) {
@@ -47,13 +49,7 @@ export function groupCardPrintings(cards) {
   }
   return [...printings.values()].sort(
     (left, right) =>
-      left.setCode.localeCompare(right.setCode, "fr", {
-        numeric: true,
-        sensitivity: "base",
-      }) ||
-      left.collectorNumber.localeCompare(right.collectorNumber, "fr", {
-        numeric: true,
-        sensitivity: "base",
-      }),
+      printingCollator.compare(left.setCode, right.setCode) ||
+      printingCollator.compare(left.collectorNumber, right.collectorNumber),
   );
 }

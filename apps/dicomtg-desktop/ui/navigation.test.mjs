@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { runInNewContext } from "node:vm";
 
+import { overviewMetrics } from "./charts.js";
+import { cardsTableCsv } from "./csv-export.js";
 import { PAGE_IDS, pageFromHash } from "./navigation.js";
 
 test("exposes the Power BI views and the local data workspace", () => {
@@ -35,6 +38,32 @@ test("renders one navigation entry and one page for every route", () => {
 
   assert.deepEqual(pages, PAGE_IDS);
   assert.deepEqual(links, PAGE_IDS);
+});
+
+test("uses French copy for every static page heading", () => {
+  const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");
+
+  for (const englishCopy of [
+    "Deck Builder",
+    "Statistics",
+    "Card view",
+    "Keyword",
+    "Set",
+    "Rarity",
+    "List of cards",
+    "Help Deck Builder",
+  ]) {
+    assert.equal(html.includes(englishCopy), false, englishCopy);
+  }
+  assert.doesNotMatch(html, /class="eyebrow"/);
+});
+
+test("keeps the navigation visible without the decorative header", () => {
+  const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");
+  const styles = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
+
+  assert.doesNotMatch(html, /class="app-header"/);
+  assert.match(styles, /\.app-nav\s*{[^}]*position: fixed;/s);
 });
 
 test("renders the Power BI chart subjects on their analysis pages", () => {
@@ -185,15 +214,95 @@ test("renders card colors and mana costs with official symbol images", () => {
   assert.doesNotMatch(html, /\/>&nbsp;?[WUBRG]<\/label>/);
 });
 
-test("documents multiple chart selection and previews both card tables", () => {
+test("previews cards from both table layouts using the shared card row", () => {
   const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");
   const script = readFileSync(new URL("./app.js", import.meta.url), "utf8");
 
   assert.doesNotMatch(html, /Clic · Ctrl\+clic multiple/);
-  assert.equal(
-    [...script.matchAll(/attachCardPreview\(detailButton, item\)/g)].length,
-    2,
+  assert.match(script, /function createCardRow\(item\)[\s\S]*?attachCardPreview\(detailButton, item\)/);
+  assert.match(script, /function createCollectionRow\(item\) \{\s+const row = createCardRow\(item\)/);
+  assert.match(script, /function createAnalysisRow\(item\) \{\s+const row = createCardRow\(item\)/);
+});
+
+test("exports every sorted result including rows outside the virtual window", async () => {
+  const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");
+  const script = readFileSync(new URL("./app.js", import.meta.url), "utf8");
+  assert.deepEqual(
+    [...html.matchAll(/data-export-table="([^"]+)"/g)].map((match) => match[1]),
+    ["type-analysis-rows", "keywords-analysis-rows", "sets-analysis-rows", "rarities-analysis-rows", "collection-rows"],
   );
+  const target = {
+    closest: (selector) => selector === "table"
+      ? { dataset: { sortKeys: "name,quantity" } }
+      : { dataset: { pageTitle: "Types" } },
+  };
+  const items = [{ name: "Zeta", quantity: 2 }, { name: "Alpha", quantity: 1 }];
+  const virtualTables = new Map([[target, { items, visible: new Map([[0, {}]]) }]]);
+  let file;
+  let clicked = false;
+  let revoked;
+  const link = { click() { clicked = true; }, remove() {} };
+  const start = script.indexOf("function exportTableCsv(");
+  runInNewContext(script.slice(start, script.indexOf("\nfunction ", start + 1)) + "\nexportTableCsv(target);", {
+    target, virtualTables, cardsTableCsv, Blob,
+    URL: { createObjectURL(blob) { file = blob; return "blob:test"; }, revokeObjectURL(url) { revoked = url; } },
+    document: { createElement: () => link, body: { append() {} } },
+    window: { setTimeout(callback) { callback(); } },
+  });
+  assert.equal(clicked, true);
+  assert.equal(link.download, "DicoMTG-Types.csv");
+  assert.equal(revoked, "blob:test");
+  assert.equal(Buffer.from(await file.arrayBuffer()).toString(), "\uFEFFCarte;Qté\r\nZeta;2\r\nAlpha;1\r\n");
+});
+
+test("uses the shared virtual window for Types on reopen and scroll", () => {
+  const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");
+  const script = readFileSync(new URL("./app.js", import.meta.url), "utf8");
+  assert.match(html, /class="table-shell virtual-table"[^>]*aria-label="Cartes du type sélectionné"/);
+  const calls = [];
+  const typeRows = {};
+  const context = {
+    typeRows,
+    typeAnalysisPending: false,
+    facetAnalyses: {},
+    pageFromHash,
+    window: { location: { hash: "#types" }, requestAnimationFrame: (fn) => { context.tick = fn; } },
+    collectionFrame: undefined,
+    renderVirtualWindow: (target) => calls.push(target),
+  };
+  const active = script.slice(script.indexOf("function renderActiveCollectionPage("), script.indexOf("function navigateToPage("));
+  const scroll = script.slice(script.indexOf("function scheduleVirtualWindow("), script.indexOf("function createCardRow("));
+  runInNewContext(`${active}\n${scroll}\nrenderActiveCollectionPage("types"); scheduleVirtualWindow();`, context);
+  context.tick();
+  assert.deepEqual(calls, [typeRows, typeRows]);
+});
+
+test("reuses facet tables until the complete collection snapshot changes", () => {
+  const script = readFileSync(new URL("./app.js", import.meta.url), "utf8");
+  const calls = [];
+  const summary = { entries: [], rows: { replaceChildren() { calls.push("invalidate"); } } };
+  const context = {
+    facetAnalyses: { sets: summary },
+    analysisContexts: new WeakMap(),
+    virtualTables: new WeakMap(),
+    refreshNameSuggestions() {},
+    refreshDetailSuggestions() {},
+    renderFacetAnalysis() { calls.push("first"); summary.baseItems = []; },
+    renderVirtualWindow() { calls.push("reopen"); },
+  };
+  const active = script.slice(
+    script.indexOf("function renderActiveCollectionPage("),
+    script.indexOf("function navigateToPage("),
+  );
+  const updateStart = script.indexOf("function updateSearchableCards(");
+  const update = script.slice(updateStart, script.indexOf("\nfunction ", updateStart + 1));
+  runInNewContext(`${active}\n${update}
+    renderActiveCollectionPage("sets");
+    renderActiveCollectionPage("sets");
+    updateSearchableCards([]);
+    renderActiveCollectionPage("sets");
+  `, context);
+  assert.deepEqual(calls, ["first", "reopen", "invalidate", "first"]);
 });
 
 test("cross-filters every overview widget from the interactive charts", () => {
@@ -250,6 +359,11 @@ test("keeps prices in the collection table and groups analysis rows by printing"
     1,
   );
   assert.equal((html.match(/<th scope="col">Prix<\/th>/g) ?? []).length, 1);
+  assert.doesNotMatch(html, /<th scope="col">Statut<\/th>/);
+  assert.match(
+    html,
+    /data-sort-keys="name,setCode,collectorNumber,quantity,finish,rarity,colors,manaValue,priceCents"/,
+  );
   assert.match(script, /const groupedItems = groupCardPrintings\(items\);/);
   assert.match(script, /formatCount\(groupedItems\.length\)/);
   assert.doesNotMatch(script, /item\.priceDate\s*\?\s*`/);
@@ -298,6 +412,83 @@ test("updates analysis metrics from the cards selected by chart filters", () => 
   );
   assert.match(
     script,
-    /function renderTypeAnalysisResults[\s\S]*?const metrics = overviewMetrics\(items\)/,
+    /function renderTypeAnalysisResults[\s\S]*?renderTypeMetrics\(items\)/,
   );
+});
+
+test("clears the Types counters when the last collection is deselected", async () => {
+  const script = readFileSync(new URL("./app.js", import.meta.url), "utf8");
+  const fields = new Map(
+    ["quantity", "distinct-names", "value"].map((key) => [
+      `#type-metric-${key}`,
+      { textContent: "42" },
+    ]),
+  );
+  const context = {
+    document: { querySelector: (id) => fields.get(id) },
+    typeSelect: { value: "" },
+    typeAnalysisPending: true,
+    typeAnalysisRequest: 0,
+    typeAnalysis: {},
+    resetTypeChartFilters: {},
+    typeAnalysisError: { hidden: false },
+    typeAnalysisStatus: {},
+    typeChartTargets: {},
+    clearTypeChartFilters() {},
+    renderChartEmpty() {},
+    renderTypeItems() {},
+    overviewMetrics,
+    formatCount: String,
+    formatCurrency: (cents) => `${cents} €`,
+  };
+  const analysis = script.slice(
+    script.indexOf("function renderTypeMetrics("),
+    script.indexOf("function renderDistributions("),
+  );
+  await runInNewContext(analysis + "\nloadTypeAnalysis();", context);
+  assert.deepEqual([...fields.values()].map((field) => field.textContent), ["0", "0", "0 €"]);
+  assert.equal(context.typeAnalysisError.hidden, true);
+});
+
+test("refreshes the complete snapshot even with a filter active on Cartes", async () => {
+  const script = readFileSync(new URL("./app.js", import.meta.url), "utf8");
+  const context = {
+    dashboardRequest: 0,
+    collectionSnapshotCurrent: true,
+    searchableCards: ["ancien"],
+    typeAnalysisRequest: 0,
+    statusRegion: {},
+    window: { location: { hash: "#types" } },
+    pageFromHash,
+    rows: { replaceChildren() {} },
+    virtualTables: new WeakMap(),
+    clearError() {},
+    setLoading() {},
+    showError: assert.fail,
+    currentQuery: () => ({ search: "Filtre" }),
+    hasActiveQuery: (query) => Boolean(query.search),
+    invoke: async (_, { query }) => ({
+      items: query.search ? ["filtré"] : ["filtré", "nouveau"],
+      distributions: { types: [] },
+    }),
+    renderMetrics() {},
+    renderDistributions() {},
+    renderOverviewAnalysis() {},
+    renderTypeOptions() {},
+    renderActiveCollectionPage() {},
+    renderDiagnostics() {},
+  };
+  context.updateSearchableCards = (items) => {
+    context.searchableCards = items;
+    context.collectionSnapshotCurrent = true;
+  };
+  const load = script.slice(
+    script.indexOf("async function loadDashboard("),
+    script.indexOf('form.addEventListener("submit"'),
+  );
+  await runInNewContext(load + "\nloadDashboard(false);", context);
+  assert.deepEqual(context.searchableCards, ["ancien"]);
+  await runInNewContext("loadDashboard(true);", context);
+  assert.deepEqual(context.searchableCards, ["filtré", "nouveau"]);
+  assert.equal(context.collectionSnapshotCurrent, true);
 });

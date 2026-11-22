@@ -19,6 +19,7 @@ import {
   filterFacetItems,
   filterOverviewItems,
   filterTypeItems,
+  typeAnalysisFromCards,
   mostExpensiveOverviewItem,
   nextChartSelection,
   overviewDistribution,
@@ -32,7 +33,14 @@ import {
   groupCardPrintings,
 } from "./card-search.js";
 import { PAGE_IDS, pageFromHash } from "./navigation.js";
-import { DEFAULT_CARD_SORT, nextCardSort, sortCards } from "./sorting.js";
+import { cardsTableCsv } from "./csv-export.js";
+import {
+  COLLECTION_ROW_HEIGHT,
+  DEFAULT_CARD_SORT,
+  nextCardSort,
+  sortCards,
+  visibleCardRows,
+} from "./sorting.js";
 import { manaSymbolParts } from "./mana-symbols.js";
 import { calculateBasicLands, DECK_COLOR_CODES } from "./deck-builder.js";
 
@@ -163,6 +171,7 @@ const facetAnalyses = Object.fromEntries(
       summary: document.querySelector(`#${kind}-result-summary`),
       reset: document.querySelector(`#reset-${kind}-chart-filters`),
       entries: null,
+      baseItems: undefined,
       manaEntries: [],
       filters: { facet: [], manaValues: [] },
     },
@@ -196,13 +205,21 @@ let cardPreviewTimer;
 let cardPreviewTarget;
 let cardDetailRequestId = 0;
 let searchableCards = [];
+let collectionSnapshotCurrent = false;
+let dashboardRequest = 0;
 let overviewDashboard;
 const overviewChartFilters = { colors: [], types: [], manaValues: [] };
 let typeAnalysis;
+let typeAnalysisPending = false;
+let typeAnalysisRequest = 0;
 const typeChartFilters = { colors: [], manaValues: [] };
 const tableSortStates = new WeakMap();
 const analysisContexts = new WeakMap();
 let collectionItems = [];
+let collectionRowsDirty = false;
+let collectionFrame;
+const virtualTables = new WeakMap();
+const tableExportButtons = new WeakMap();
 let managedCollections = [];
 let collectionUpdateTarget;
 let selectedImportFile;
@@ -215,9 +232,6 @@ const invoke = window.__TAURI__?.core?.invoke;
 
 function showPage(page) {
   hideCardPreview();
-  for (const [kind, analysis] of Object.entries(facetAnalyses)) {
-    if (kind !== page) analysis.rows.replaceChildren();
-  }
   for (const [pageId, element] of pageElements) {
     element.hidden = pageId !== page;
   }
@@ -234,9 +248,24 @@ function routeFromLocation() {
     window.history.replaceState(null, "", `#${page}`);
   }
   showPage(page);
-  const facetAnalysis = facetAnalyses[page];
-  if (facetAnalysis?.entries) renderFacetAnalysis(page, facetAnalysis.entries);
+  renderActiveCollectionPage(page);
   if (page === "data") loadImageCacheStats();
+}
+
+function renderActiveCollectionPage(page) {
+  const facetAnalysis = facetAnalyses[page];
+  if (facetAnalysis?.entries) {
+    if (!facetAnalysis.baseItems) renderFacetAnalysis(page, facetAnalysis.entries);
+    else renderVirtualWindow(facetAnalysis.rows);
+  }
+  if (page === "types") {
+    if (typeAnalysisPending) void loadTypeAnalysis();
+    else renderVirtualWindow(typeRows);
+  }
+  if (page === "collection") {
+    if (collectionRowsDirty) renderItems(collectionItems);
+    else renderVirtualWindow(rows);
+  }
 }
 
 function navigateToPage(page) {
@@ -284,6 +313,13 @@ function refreshDetailSuggestions() {
 
 function updateSearchableCards(cards) {
   searchableCards = cards;
+  collectionSnapshotCurrent = true;
+  for (const analysis of Object.values(facetAnalyses)) {
+    analysis.baseItems = undefined;
+    analysisContexts.delete(analysis.rows);
+    virtualTables.delete(analysis.rows);
+    analysis.rows.replaceChildren();
+  }
   refreshNameSuggestions();
   refreshDetailSuggestions();
 }
@@ -291,6 +327,7 @@ function updateSearchableCards(cards) {
 function setLoading(loading) {
   submitButton.disabled = loading;
   submitButton.textContent = loading ? "Chargement…" : "Appliquer";
+  setTableExportAvailable(rows, !loading && virtualTables.has(rows));
 }
 
 function setImportLoading(loading) {
@@ -757,14 +794,7 @@ function rerenderSortedTable(rowsTarget) {
     return;
   }
   const context = analysisContexts.get(rowsTarget);
-  if (context) {
-    renderAnalysisItems(
-      context.items,
-      rowsTarget,
-      context.summaryTarget,
-      context.emptyMessage,
-    );
-  }
+  if (context) renderSortedAnalysisRows(rowsTarget, context);
 }
 
 function initializeSortableTables() {
@@ -797,54 +827,168 @@ function initializeSortableTables() {
   }
 }
 
+function setTableExportAvailable(target, available) {
+  const button = tableExportButtons.get(target);
+  if (button) button.disabled = !available;
+}
+
+function initializeTableExports() {
+  for (const button of document.querySelectorAll("[data-export-table]")) {
+    const target = document.getElementById(button.dataset.exportTable);
+    tableExportButtons.set(target, button);
+    button.addEventListener("click", () => exportTableCsv(target));
+  }
+}
+
+function exportTableCsv(target) {
+  const items = virtualTables.get(target)?.items;
+  if (!items?.length) return;
+  const columns = target.closest("table").dataset.sortKeys.split(",");
+  const blob = new Blob([cardsTableCsv(items, columns)], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `DicoMTG-${target.closest("[data-page]").dataset.pageTitle}.csv`;
+  link.hidden = true;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 function renderItems(items) {
+  collectionRowsDirty = false;
+  renderVirtualTable(
+    rows,
+    sortCards(items, sortStateFor(rows)),
+    createCollectionRow,
+    "Aucune carte ne correspond aux filtres actuels.",
+  );
+}
+
+function renderEmptyCardRows(target, columns, message) {
+  setTableExportAvailable(target, false);
+  const row = document.createElement("tr");
+  const cell = row.insertCell();
+  cell.colSpan = columns;
+  cell.className = "empty-state";
+  cell.textContent = message;
+  target.replaceChildren(row);
+}
+
+function renderVirtualTable(target, items, createRow, emptyMessage) {
   hideCardPreview();
-  collectionItems = items;
-  rows.replaceChildren();
+  const table = target.closest("table");
+  const columns = table.tHead.rows[0].cells.length;
+  table.setAttribute("aria-rowcount", Math.max(items.length, 1) + 1);
   if (items.length === 0) {
-    const row = document.createElement("tr");
-    const cell = document.createElement("td");
-    cell.colSpan = 10;
-    cell.className = "empty-state";
-    cell.textContent = "Aucune carte ne correspond aux filtres actuels.";
-    row.append(cell);
-    rows.append(row);
+    virtualTables.delete(target);
+    renderEmptyCardRows(target, columns, emptyMessage);
     return;
   }
 
-  for (const item of sortCards(items, sortStateFor(rows))) {
-    const row = document.createElement("tr");
-    const nameCell = document.createElement("td");
-    const detailButton = document.createElement("button");
-    detailButton.type = "button";
-    detailButton.className = "card-detail-trigger";
-    detailButton.textContent = item.name;
-    detailButton.setAttribute("aria-label", `Consulter la fiche de ${item.name}`);
-    detailButton.addEventListener("click", () => showCardDetail(item));
-    attachCardPreview(detailButton, item);
-    nameCell.append(detailButton);
-    row.append(nameCell);
-    appendCell(row, item.setCode);
-    appendCell(row, item.collectorNumber);
-    appendCell(row, formatCount(item.quantity), "numeric");
-    appendCell(row, finishLabel(item.finish));
-    appendCell(row, item.rarity ?? "Indisponible");
-    appendCell(row, createColorSymbols(item.colors));
-    appendCell(
-      row,
-      item.manaValue === null ? "Indisponible" : String(item.manaValue),
-      "numeric",
-    );
-    appendCell(row, formatCurrency(item.priceCents), "price");
+  const spacers = [0, items.length].map((count) => {
+    const spacer = document.createElement("tr");
+    const cell = spacer.insertCell();
+    spacer.className = "virtual-spacer";
+    spacer.setAttribute("aria-hidden", "true");
+    cell.colSpan = columns;
+    cell.style.height = `${count * COLLECTION_ROW_HEIGHT}px`;
+    return spacer;
+  });
+  virtualTables.set(target, { items, spacers, createRow, visible: new Map() });
+  setTableExportAvailable(target, true);
+  target.replaceChildren(...spacers);
+  renderVirtualWindow(target);
+}
 
-    const statusCell = document.createElement("td");
-    const badge = document.createElement("span");
-    badge.className = `status-badge status-badge--${item.status}`;
-    badge.textContent = statusLabel(item.status);
-    statusCell.append(badge);
-    row.append(statusCell);
-    rows.append(row);
+function renderVirtualWindow(target) {
+  const state = virtualTables.get(target);
+  if (!state || target.closest("[data-page]").hidden) return;
+  const { items, spacers, createRow, visible } = state;
+  const count = items.length;
+  const { start, end } = visibleCardRows(count, target.getBoundingClientRect().top, window.innerHeight);
+  for (const [index, row] of visible) {
+    if (index >= start && index < end) continue;
+    if (row.contains(document.activeElement)) target.closest(".table-shell").focus({ preventScroll: true });
+    row.remove();
+    visible.delete(index);
   }
+
+  const [topSpacer, bottomSpacer] = spacers;
+  topSpacer.cells[0].style.height = `${start * COLLECTION_ROW_HEIGHT}px`;
+  bottomSpacer.cells[0].style.height = `${(count - end) * COLLECTION_ROW_HEIGHT}px`;
+  let next = bottomSpacer;
+  for (let index = end - 1; index >= start; index--) {
+    let row = visible.get(index);
+    if (!row) {
+      row = createRow(items[index]);
+      row.className = "virtual-card-row";
+      row.style.height = `${COLLECTION_ROW_HEIGHT}px`;
+      row.setAttribute("aria-rowindex", index + 2);
+      for (const cell of row.cells) {
+        if (!cell.firstElementChild) cell.title = cell.textContent;
+      }
+      row.addEventListener("keydown", (event) => {
+        if (event.key !== "Tab" || event.altKey || event.ctrlKey || event.metaKey) return;
+        const nextIndex = index + (event.shiftKey ? -1 : 1);
+        if (nextIndex < 0 || nextIndex >= count || visible.has(nextIndex)) return;
+        event.preventDefault();
+        const bodyTop = target.getBoundingClientRect().top + window.scrollY;
+        window.scrollTo({ top: bodyTop + nextIndex * COLLECTION_ROW_HEIGHT - window.innerHeight / 2, behavior: "instant" });
+        renderVirtualWindow(target);
+        visible.get(nextIndex)?.querySelector("button").focus();
+      });
+      visible.set(index, row);
+    }
+    if (row.nextSibling !== next) next.before(row);
+    next = row;
+  }
+}
+
+function scheduleVirtualWindow() {
+  const page = pageFromHash(window.location.hash);
+  const target = page === "collection" ? rows
+    : page === "types" ? typeRows
+    : facetAnalyses[page]?.rows;
+  if (!target || collectionFrame !== undefined) return;
+  collectionFrame = window.requestAnimationFrame(() => {
+    collectionFrame = undefined;
+    renderVirtualWindow(target);
+  });
+}
+
+function createCardRow(item) {
+  const row = document.createElement("tr");
+  const nameCell = document.createElement("td");
+  const detailButton = document.createElement("button");
+  detailButton.type = "button";
+  detailButton.className = "card-detail-trigger";
+  detailButton.textContent = item.name;
+  detailButton.title = item.name;
+  detailButton.setAttribute("aria-label", `Consulter la fiche de ${item.name}`);
+  detailButton.addEventListener("click", () => showCardDetail(item));
+  attachCardPreview(detailButton, item);
+  nameCell.append(detailButton);
+  row.append(nameCell);
+  return row;
+}
+
+function createCollectionRow(item) {
+  const row = createCardRow(item);
+  appendCell(row, item.setCode);
+  appendCell(row, item.collectorNumber);
+  appendCell(row, formatCount(item.quantity), "numeric");
+  appendCell(row, finishLabel(item.finish));
+  appendCell(row, item.rarity ?? "Indisponible");
+  appendCell(row, createColorSymbols(item.colors));
+  appendCell(
+    row,
+    item.manaValue === null ? "Indisponible" : String(item.manaValue),
+    "numeric",
+  );
+  appendCell(row, formatCurrency(item.priceCents), "price");
+  return row;
 }
 
 function renderDistribution(kind, entries) {
@@ -1141,17 +1285,18 @@ function renderFacetAnalysis(kind, entries) {
   analysis.filters.facet = analysis.filters.facet.filter((label) =>
     entries.some((entry) => entry.label === label),
   );
-  const baseItems = filterFacetItems(searchableCards, kind, []);
-  analysis.manaEntries = overviewDistribution(baseItems, "manaValues");
+  if (!analysis.baseItems) {
+    analysis.baseItems = filterFacetItems(searchableCards, kind, []);
+    analysis.manaEntries = overviewDistribution(analysis.baseItems, "manaValues");
+  }
+  const baseItems = analysis.baseItems;
   analysis.filters.manaValues = analysis.filters.manaValues.filter((label) =>
     analysis.manaEntries.some((entry) => entry.label === label),
   );
-  const filteredItems = filterFacetItems(
-    searchableCards,
-    kind,
-    analysis.filters.facet,
-    analysis.filters.manaValues,
-  );
+  const { facet, manaValues } = analysis.filters;
+  const filteredItems = facet.length || manaValues.length
+    ? filterFacetItems(baseItems, kind, facet, manaValues)
+    : baseItems;
   const metrics = overviewMetrics(filteredItems);
   analysis.metrics.quantity.textContent = formatCount(metrics.totalQuantity);
   analysis.metrics.distinctNames.textContent = formatCount(metrics.distinctNames);
@@ -1203,12 +1348,6 @@ function renderFacetAnalysis(kind, entries) {
   }
   if (filters.length > 0) analysis.summary.textContent += ` · ${filters.join(" · ")}`;
   analysis.reset.hidden = filters.length === 0;
-}
-
-function renderCharts(distributions) {
-  for (const kind of facetKinds) {
-    renderFacetAnalysis(kind, distributions[kind]);
-  }
 }
 
 function deckInputValue(key) {
@@ -1366,44 +1505,29 @@ function renderTypeOptions(entries) {
 }
 
 function renderAnalysisItems(items, rowsTarget, summaryTarget, emptyMessage) {
-  hideCardPreview();
-  analysisContexts.set(rowsTarget, { items, summaryTarget, emptyMessage });
-  rowsTarget.replaceChildren();
   const groupedItems = groupCardPrintings(items);
   summaryTarget.textContent = `${formatCount(groupedItems.length)} impression${groupedItems.length > 1 ? "s" : ""}`;
-  if (groupedItems.length === 0) {
-    const row = document.createElement("tr");
-    const cell = document.createElement("td");
-    cell.colSpan = 5;
-    cell.className = "empty-state";
-    cell.textContent = emptyMessage;
-    row.append(cell);
-    rowsTarget.append(row);
-    return;
-  }
+  const context = { groupedItems, emptyMessage };
+  analysisContexts.set(rowsTarget, context);
+  renderSortedAnalysisRows(rowsTarget, context);
+}
 
-  for (const item of sortCards(groupedItems, sortStateFor(rowsTarget))) {
-    const row = document.createElement("tr");
-    const nameCell = document.createElement("td");
-    const detailButton = document.createElement("button");
-    detailButton.type = "button";
-    detailButton.className = "card-detail-trigger";
-    detailButton.textContent = item.name;
-    detailButton.setAttribute("aria-label", `Consulter la fiche de ${item.name}`);
-    detailButton.addEventListener("click", () => showCardDetail(item));
-    attachCardPreview(detailButton, item);
-    nameCell.append(detailButton);
-    row.append(nameCell);
-    appendCell(row, item.setCode);
-    appendCell(row, formatCount(item.quantity), "numeric");
-    appendCell(row, createColorSymbols(item.colors));
-    appendCell(
-      row,
-      item.manaValue === null ? "Indisponible" : String(item.manaValue),
-      "numeric",
-    );
-    rowsTarget.append(row);
-  }
+function renderSortedAnalysisRows(target, { groupedItems, emptyMessage }) {
+  const items = sortCards(groupedItems, sortStateFor(target));
+  renderVirtualTable(target, items, createAnalysisRow, emptyMessage);
+}
+
+function createAnalysisRow(item) {
+  const row = createCardRow(item);
+  appendCell(row, item.setCode);
+  appendCell(row, formatCount(item.quantity), "numeric");
+  appendCell(row, createColorSymbols(item.colors));
+  appendCell(
+    row,
+    item.manaValue === null ? "Indisponible" : String(item.manaValue),
+    "numeric",
+  );
+  return row;
 }
 
 function renderTypeItems(items) {
@@ -1469,16 +1593,7 @@ function renderTypeAnalysisResults() {
     filters.push(`mana ${typeChartFilters.manaValues.join(" ou ")}`);
   }
   const items = filterTypeItems(typeAnalysis.items, typeChartFilters);
-  const metrics = overviewMetrics(items);
-  document.querySelector("#type-metric-quantity").textContent = formatCount(
-    metrics.totalQuantity,
-  );
-  document.querySelector("#type-metric-distinct-names").textContent = formatCount(
-    metrics.distinctNames,
-  );
-  document.querySelector("#type-metric-value").textContent = formatCurrency(
-    metrics.totalValueCents,
-  );
+  renderTypeMetrics(items);
   renderTypeItems(items);
   if (filters.length > 0) {
     typeResultSummary.textContent += ` · ${filters.join(" · ")}`;
@@ -1487,6 +1602,13 @@ function renderTypeAnalysisResults() {
   typeAnalysisStatus.textContent = filters.length
     ? `${formatCount(items.length)} impressions affichées, filtres ${filters.join(", ")}`
     : `Analyse ${typeAnalysis.selectedType} chargée`;
+}
+
+function renderTypeMetrics(items) {
+  const metrics = overviewMetrics(items);
+  document.querySelector("#type-metric-quantity").textContent = formatCount(metrics.totalQuantity);
+  document.querySelector("#type-metric-distinct-names").textContent = formatCount(metrics.distinctNames);
+  document.querySelector("#type-metric-value").textContent = formatCurrency(metrics.totalValueCents);
 }
 
 function setTypeAnalysisLoading() {
@@ -1502,17 +1624,23 @@ function setTypeAnalysisLoading() {
   typeResultSummary.textContent = "Chargement…";
   renderChartMessage(typeChartTargets.colors, "Chargement…");
   renderChartMessage(typeChartTargets.manaValues, "Chargement…");
-  typeRows.innerHTML = '<tr><td colspan="6" class="empty-state">Chargement des cartes…</td></tr>';
+  virtualTables.delete(typeRows);
+  renderEmptyCardRows(typeRows, 5, "Chargement des cartes…");
 }
 
 async function loadTypeAnalysis() {
+  typeAnalysisPending = false;
+  const request = ++typeAnalysisRequest;
   const cardType = typeSelect.value;
   if (!cardType) {
     typeAnalysis = undefined;
     clearTypeChartFilters();
     resetTypeChartFilters.hidden = true;
+    typeAnalysisError.hidden = true;
+    typeAnalysisStatus.textContent = "Aucun type disponible";
     renderChartEmpty(typeChartTargets.colors);
     renderChartEmpty(typeChartTargets.manaValues);
+    renderTypeMetrics([]);
     renderTypeItems([]);
     return;
   }
@@ -1520,10 +1648,14 @@ async function loadTypeAnalysis() {
   setTypeAnalysisLoading();
   try {
     if (!invoke) throw new Error("L’interface doit être ouverte depuis l’application DicoMTG.");
-    const analysis = await invoke("load_type_analysis", { cardType });
+    const analysis = collectionSnapshotCurrent
+      ? typeAnalysisFromCards(searchableCards, cardType)
+      : await invoke("load_type_analysis", { cardType });
+    if (request !== typeAnalysisRequest) return;
     typeAnalysis = analysis;
     renderTypeAnalysisResults();
   } catch (error) {
+    if (request !== typeAnalysisRequest) return;
     typeAnalysis = undefined;
     typeAnalysisError.textContent = String(error);
     typeAnalysisError.hidden = false;
@@ -1531,7 +1663,9 @@ async function loadTypeAnalysis() {
     renderChartMessage(typeChartTargets.manaValues, "Analyse indisponible.");
     renderTypeItems([]);
   } finally {
-    typeSelect.disabled = typeSelect.options.length === 0;
+    if (request === typeAnalysisRequest) {
+      typeSelect.disabled = typeSelect.options.length === 0;
+    }
   }
 }
 
@@ -1539,7 +1673,9 @@ function renderDistributions(distributions) {
   for (const kind of Object.keys(distributionLists)) {
     renderDistribution(kind, distributions[kind]);
   }
-  renderCharts(distributions);
+  for (const kind of facetKinds) {
+    facetAnalyses[kind].entries = distributions[kind];
+  }
 }
 
 function resetImportSource() {
@@ -1744,6 +1880,8 @@ function renderDiagnostics(diagnostics) {
 }
 
 async function loadDashboard(refreshSearchIndex = false) {
+  const request = ++dashboardRequest;
+  if (refreshSearchIndex) collectionSnapshotCurrent = false;
   clearError();
   setLoading(true);
   statusRegion.textContent = "Chargement de la collection";
@@ -1751,12 +1889,14 @@ async function loadDashboard(refreshSearchIndex = false) {
     if (!invoke) throw new Error("L’interface doit être ouverte depuis l’application DicoMTG.");
     const query = currentQuery();
     const dashboard = await invoke("load_dashboard", { query });
+    if (request !== dashboardRequest) return false;
     if (!hasActiveQuery(query)) {
       updateSearchableCards(dashboard.items);
-    } else if (refreshSearchIndex) {
+    } else if (!collectionSnapshotCurrent) {
       const unfiltered = await invoke("load_dashboard", {
         query: { search: "", colors: [], rarities: [] },
       });
+      if (request !== dashboardRequest) return false;
       updateSearchableCards(unfiltered.items);
     }
     renderMetrics(dashboard.metrics, dashboard.items.length);
@@ -1767,16 +1907,30 @@ async function loadDashboard(refreshSearchIndex = false) {
     renderDistributions(dashboard.distributions);
     renderOverviewAnalysis();
     renderTypeOptions(dashboard.distributions.types);
-    await loadTypeAnalysis();
-    renderItems(dashboard.items);
+    typeAnalysisPending = true;
+    typeAnalysisRequest += 1;
+    collectionItems = dashboard.items;
+    collectionRowsDirty = true;
+    const page = pageFromHash(window.location.hash);
+    if (page !== "collection") {
+      virtualTables.delete(rows);
+      rows.replaceChildren();
+    }
+    if (page !== "types") {
+      typeAnalysis = undefined;
+      virtualTables.delete(typeRows);
+      typeRows.replaceChildren();
+      analysisContexts.delete(typeRows);
+    }
+    renderActiveCollectionPage(page);
     renderDiagnostics(dashboard.diagnostics);
     statusRegion.textContent = "Collection chargée";
     return true;
   } catch (error) {
-    showError(String(error));
+    if (request === dashboardRequest) showError(String(error));
     return false;
   } finally {
-    setLoading(false);
+    if (request === dashboardRequest) setLoading(false);
   }
 }
 
@@ -1890,6 +2044,7 @@ importForm.addEventListener("submit", async (event) => {
           csv,
         })
       : await invoke("create_collection", { name, csv });
+    collectionSnapshotCurrent = false;
     renderImportResult(summary);
     setCollectionImportMode(undefined);
     importResult.hidden = false;
@@ -1975,6 +2130,8 @@ for (const [key, input] of deckRangeInputs) {
 window.addEventListener("hashchange", routeFromLocation);
 window.addEventListener("resize", hideCardPreview);
 window.addEventListener("scroll", hideCardPreview, true);
+window.addEventListener("resize", scheduleVirtualWindow);
+window.addEventListener("scroll", scheduleVirtualWindow, { passive: true });
 window.addEventListener("keydown", (event) => {
   if (event.key === "Escape") hideCardPreview();
 });
@@ -1982,6 +2139,7 @@ for (const target of document.querySelectorAll("[data-mana-symbol]")) {
   target.replaceWith(createManaSymbolText(target.dataset.manaSymbol));
 }
 initializeSortableTables();
+initializeTableExports();
 renderDeckBuilder();
 routeFromLocation();
 setCollectionImportMode(undefined);

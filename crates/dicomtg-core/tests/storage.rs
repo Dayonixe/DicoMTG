@@ -12,6 +12,15 @@ use dicomtg_core::{
 };
 
 #[test]
+fn col_009_new_store_starts_without_collection() -> Result<(), Box<dyn Error>> {
+    let store = CollectionStore::in_memory()?;
+
+    assert!(store.collections()?.is_empty());
+    assert!(store.load_collection()?.items().is_empty());
+    Ok(())
+}
+
+#[test]
 fn col_006_replace_is_idempotent_and_round_trips_diagnostics() -> Result<(), Box<dyn Error>> {
     let mut store = CollectionStore::in_memory()?;
     let collection = diagnostic_collection()?;
@@ -54,6 +63,66 @@ fn col_006_failed_replace_keeps_the_previous_collection() -> Result<(), Box<dyn 
 }
 
 #[test]
+fn collection_readers_and_writers_share_the_database() -> Result<(), Box<dyn Error>> {
+    let path = temporary_database_path()?;
+    let mut store = CollectionStore::open(&path)?;
+    let initial = matched_collection("abrade", "Abrade", "DOM", "117")?;
+    let updated = matched_collection_with_quantity("abrade", "Abrade", "DOM", "117", 2)?;
+    store.replace_collection(&initial)?;
+
+    let mut peer = rusqlite::Connection::open(&path)?;
+    let snapshot = peer.transaction()?;
+    let quantity = "SELECT quantity FROM collection_items";
+    assert_eq!(
+        snapshot.query_row(quantity, [], |row| row.get::<_, u32>(0))?,
+        1
+    );
+    store.replace_collection(&updated)?;
+    assert_eq!(
+        snapshot.query_row(quantity, [], |row| row.get::<_, u32>(0))?,
+        1
+    );
+    snapshot.commit()?;
+    assert_eq!(peer.query_row(quantity, [], |row| row.get::<_, u32>(0))?, 2);
+
+    let writer = peer.transaction_with_behavior(rusqlite::TransactionBehavior::Exclusive)?;
+    writer.execute("UPDATE collection_items SET quantity = 3", [])?;
+    assert_eq!(store.load_collection_with_references()?.0, updated);
+    writer.commit()?;
+    assert_eq!(
+        store.load_collection_with_references()?.0.items()[0].quantity(),
+        3
+    );
+
+    drop(peer);
+    drop(store);
+    fs::remove_file(path)?;
+    Ok(())
+}
+
+#[test]
+fn rematch_preserves_a_newer_import() -> Result<(), Box<dyn Error>> {
+    let path = temporary_database_path()?;
+    let mut importer = CollectionStore::open(&path)?;
+    let original = matched_collection("abrade", "Abrade", "DOM", "117")?;
+    let latest = matched_collection_with_quantity("abrade", "Abrade", "DOM", "117", 3)?;
+    let rematched = matched_collection("corrected", "Abrade", "DOM", "117")?;
+    let id = importer.create_collection("Ma collection", &original)?;
+    let mut updater = importer.open_peer()?;
+    let snapshot = updater.load_collection_by_id(id)?;
+    importer.replace_collection_for(id, &latest)?;
+
+    assert!(!updater.replace_collection_if_unchanged(id, &snapshot, &rematched)?);
+    assert_eq!(updater.load_collection_by_id(id)?, latest);
+    assert!(updater.replace_collection_if_unchanged(id, &latest, &rematched)?);
+    assert_eq!(importer.load_collection_by_id(id)?, rematched);
+    drop(updater);
+    drop(importer);
+    fs::remove_file(path)?;
+    Ok(())
+}
+
+#[test]
 fn col_009_manages_and_merges_selected_named_collections() -> Result<(), Box<dyn Error>> {
     let mut store = CollectionStore::in_memory()?;
     let own = matched_collection("abrade", "Abrade", "DOM", "117")?;
@@ -91,6 +160,7 @@ fn col_009_rejects_blank_and_duplicate_collection_names() -> Result<(), Box<dyn 
     let collection = matched_collection("abrade", "Abrade", "DOM", "117")?;
 
     assert!(store.create_collection("   ", &collection).is_err());
+    store.replace_collection(&collection)?;
     assert!(
         store
             .create_collection("ma COLLECTION", &collection)

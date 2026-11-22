@@ -1,4 +1,11 @@
-use std::{collections::HashMap, error::Error, fmt, path::Path, time::Duration};
+use std::{
+    collections::HashMap,
+    error::Error,
+    fmt,
+    path::Path,
+    sync::{Arc, Mutex, MutexGuard},
+    time::Duration,
+};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
@@ -38,6 +45,18 @@ const MIGRATIONS: &[(i64, &str)] = &[
     ),
 ];
 
+const SELECTED_PRINTING_UUIDS: &str = "SELECT items.uuid FROM collections
+     JOIN collection_items AS items ON items.collection_id = collections.id
+     WHERE collections.selected = 1";
+
+fn reference_scope(uuid_column: &str, selected_only: bool) -> String {
+    if selected_only {
+        format!("WHERE {uuid_column} IN ({SELECTED_PRINTING_UUIDS})")
+    } else {
+        String::new()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredCollection {
     id: i64,
@@ -70,6 +89,7 @@ impl StoredCollection {
 
 pub struct CollectionStore {
     connection: Connection,
+    writer: Arc<Mutex<()>>,
 }
 
 impl CollectionStore {
@@ -78,21 +98,61 @@ impl CollectionStore {
     }
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
-        Self::from_connection(Connection::open(path)?)
+        let store = Self::from_connection(Connection::open(path)?)?;
+        // Analysis reads must not block commits from the reference updater.
+        store
+            .connection
+            .pragma_update(None, "journal_mode", "WAL")?;
+        Ok(store)
+    }
+
+    pub fn open_peer(&self) -> Result<Self, StorageError> {
+        let path = self
+            .connection
+            .path()
+            .filter(|path| !path.is_empty())
+            .ok_or_else(|| StorageError::InvalidData("database has no file path".into()))?;
+        let mut peer = Self::open(path)?;
+        peer.writer = Arc::clone(&self.writer);
+        Ok(peer)
     }
 
     fn from_connection(mut connection: Connection) -> Result<Self, StorageError> {
         connection.busy_timeout(Duration::from_secs(5))?;
         connection.execute_batch("PRAGMA foreign_keys = ON;")?;
         apply_migrations(&mut connection)?;
-        Ok(Self { connection })
+        Ok(Self {
+            connection,
+            writer: Arc::new(Mutex::new(())),
+        })
+    }
+
+    fn lock_writer(&self) -> Result<MutexGuard<'_, ()>, StorageError> {
+        self.writer
+            .lock()
+            .map_err(|_| StorageError::InvalidData("database writer mutex is poisoned".into()))
+    }
+
+    fn begin_write(&self) -> Result<(MutexGuard<'_, ()>, Transaction<'_>), StorageError> {
+        let guard = self.lock_writer()?;
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        Ok((guard, transaction))
     }
 
     pub fn replace_collection(
         &mut self,
         collection: &CollectionSnapshot,
     ) -> Result<(), StorageError> {
-        self.replace_collection_for(1, collection)
+        let (_writer, transaction) = self.begin_write()?;
+        transaction.execute(
+            "INSERT OR IGNORE INTO collections (id, name, selected) VALUES (1, 'Ma collection', 1)",
+            [],
+        )?;
+        ensure_collection_exists(&transaction, 1)?;
+        replace_collection_in_transaction(&transaction, 1, collection)?;
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn create_collection(
@@ -101,9 +161,7 @@ impl CollectionStore {
         collection: &CollectionSnapshot,
     ) -> Result<i64, StorageError> {
         let name = valid_collection_name(name)?;
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (_writer, transaction) = self.begin_write()?;
         ensure_unique_collection_name(&transaction, name, None)?;
         transaction.execute(
             "INSERT INTO collections (name, selected) VALUES (?1, 1)",
@@ -120,13 +178,27 @@ impl CollectionStore {
         collection_id: i64,
         collection: &CollectionSnapshot,
     ) -> Result<(), StorageError> {
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (_writer, transaction) = self.begin_write()?;
         ensure_collection_exists(&transaction, collection_id)?;
         replace_collection_in_transaction(&transaction, collection_id, collection)?;
         transaction.commit()?;
         Ok(())
+    }
+
+    pub fn replace_collection_if_unchanged(
+        &mut self,
+        collection_id: i64,
+        expected: &CollectionSnapshot,
+        replacement: &CollectionSnapshot,
+    ) -> Result<bool, StorageError> {
+        let (_writer, transaction) = self.begin_write()?;
+        ensure_collection_exists(&transaction, collection_id)?;
+        if self.load_collection_rows(collection_id)? != *expected {
+            return Ok(false);
+        }
+        replace_collection_in_transaction(&transaction, collection_id, replacement)?;
+        transaction.commit()?;
+        Ok(true)
     }
 
     pub fn rename_collection(
@@ -135,9 +207,7 @@ impl CollectionStore {
         name: &str,
     ) -> Result<(), StorageError> {
         let name = valid_collection_name(name)?;
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (_writer, transaction) = self.begin_write()?;
         ensure_collection_exists(&transaction, collection_id)?;
         ensure_unique_collection_name(&transaction, name, Some(collection_id))?;
         transaction.execute(
@@ -153,6 +223,7 @@ impl CollectionStore {
         collection_id: i64,
         selected: bool,
     ) -> Result<(), StorageError> {
+        let _writer = self.lock_writer()?;
         let changed = self.connection.execute(
             "UPDATE collections SET selected = ?1 WHERE id = ?2",
             params![selected, collection_id],
@@ -201,7 +272,14 @@ impl CollectionStore {
         &self,
         collection_id: i64,
     ) -> Result<CollectionSnapshot, StorageError> {
-        ensure_collection_exists(&self.connection, collection_id)?;
+        let transaction = self.connection.unchecked_transaction()?;
+        ensure_collection_exists(&transaction, collection_id)?;
+        let collection = self.load_collection_rows(collection_id)?;
+        transaction.commit()?;
+        Ok(collection)
+    }
+
+    fn load_collection_rows(&self, collection_id: i64) -> Result<CollectionSnapshot, StorageError> {
         let items = self.load_items(collection_id)?;
         let unresolved = self.load_unresolved(collection_id)?;
         let import_issues = self.load_import_issues(collection_id)?;
@@ -209,17 +287,41 @@ impl CollectionStore {
     }
 
     pub fn load_collection(&self) -> Result<CollectionSnapshot, StorageError> {
-        let collections = self
-            .collections()?
+        let selected_ids = self
+            .connection
+            .prepare_cached("SELECT id FROM collections WHERE selected = 1 ORDER BY id")?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<Vec<i64>, _>>()?;
+        let collections = selected_ids
             .into_iter()
-            .filter(|collection| collection.selected())
-            .map(|collection| self.load_collection_by_id(collection.id()))
+            .map(|id| self.load_collection_rows(id))
             .collect::<Result<Vec<_>, _>>()?;
         merge_collections(collections).map_err(|error| StorageError::InvalidData(error.to_string()))
     }
 
+    pub fn load_collection_with_references(
+        &self,
+    ) -> Result<(CollectionSnapshot, Vec<CatalogCard>, Vec<ReferencePrice>), StorageError> {
+        // The reference updater writes through a separate connection.
+        let transaction = self.connection.unchecked_transaction()?;
+        let collection = self.load_collection()?;
+        let catalog = self.load_catalog_scoped(true)?;
+        let prices = self.load_prices_scoped(true)?;
+        transaction.commit()?;
+        Ok((collection, catalog, prices))
+    }
+
+    pub fn reference_counts(&self) -> Result<(usize, usize), StorageError> {
+        Ok(self.connection.query_row(
+            "SELECT (SELECT COUNT(*) FROM catalog_cards),
+                    (SELECT COUNT(*) FROM reference_prices)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?)
+    }
+
     fn load_items(&self, collection_id: i64) -> Result<Vec<OwnedPrinting>, StorageError> {
-        let mut statement = self.connection.prepare(
+        let mut statement = self.connection.prepare_cached(
             "SELECT uuid, finish, quantity FROM collection_items
              WHERE collection_id = ?1 ORDER BY position",
         )?;
@@ -238,11 +340,11 @@ impl CollectionStore {
     }
 
     fn load_unresolved(&self, collection_id: i64) -> Result<Vec<UnresolvedCard>, StorageError> {
-        let mut card_statement = self.connection.prepare(
+        let mut card_statement = self.connection.prepare_cached(
             "SELECT id, name, set_code, collector_number, quantity, match_status, language, printing
              FROM unresolved_cards WHERE collection_id = ?1 ORDER BY position",
         )?;
-        let mut candidate_statement = self.connection.prepare(
+        let mut candidate_statement = self.connection.prepare_cached(
             "SELECT uuid FROM unresolved_candidates
              WHERE unresolved_id = ?1 ORDER BY position",
         )?;
@@ -292,7 +394,7 @@ impl CollectionStore {
     }
 
     fn load_import_issues(&self, collection_id: i64) -> Result<Vec<ImportIssue>, StorageError> {
-        let mut statement = self.connection.prepare(
+        let mut statement = self.connection.prepare_cached(
             "SELECT source_line, reason_code, detail FROM import_issues
              WHERE collection_id = ?1 ORDER BY position",
         )?;
@@ -319,9 +421,7 @@ impl CollectionStore {
     }
 
     pub fn replace_catalog(&mut self, catalog: &CatalogImport) -> Result<(), StorageError> {
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (_writer, transaction) = self.begin_write()?;
         transaction.execute("DELETE FROM catalog_cards", [])?;
 
         {
@@ -375,13 +475,21 @@ impl CollectionStore {
     }
 
     pub fn load_catalog(&self) -> Result<Vec<CatalogCard>, StorageError> {
-        let mut facets = self.load_catalog_facets()?;
-        let mut statement = self.connection.prepare(
+        let transaction = self.connection.unchecked_transaction()?;
+        let catalog = self.load_catalog_scoped(false)?;
+        transaction.commit()?;
+        Ok(catalog)
+    }
+
+    fn load_catalog_scoped(&self, selected_only: bool) -> Result<Vec<CatalogCard>, StorageError> {
+        let mut facets = self.load_catalog_facets(selected_only)?;
+        let scope = reference_scope("uuid", selected_only);
+        let mut statement = self.connection.prepare(&format!(
             "SELECT uuid, name, set_code, collector_number, rarity, mana_value, language,
                     mana_cost, power, toughness, type_line, rules_text, scryfall_id,
                     has_back_face, cardmarket_id
-             FROM catalog_cards ORDER BY position",
-        )?;
+             FROM catalog_cards {scope} ORDER BY position",
+        ))?;
         let mut rows = statement.query([])?;
         let mut cards = Vec::new();
 
@@ -419,9 +527,7 @@ impl CollectionStore {
     }
 
     pub fn replace_prices(&mut self, prices: &PriceImport) -> Result<(), StorageError> {
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (_writer, transaction) = self.begin_write()?;
         transaction.execute("DELETE FROM reference_prices", [])?;
 
         {
@@ -452,12 +558,17 @@ impl CollectionStore {
     }
 
     pub fn load_prices(&self) -> Result<Vec<ReferencePrice>, StorageError> {
-        let mut statement = self.connection.prepare(
+        self.load_prices_scoped(false)
+    }
+
+    fn load_prices_scoped(&self, selected_only: bool) -> Result<Vec<ReferencePrice>, StorageError> {
+        let scope = reference_scope("uuid", selected_only);
+        let mut statement = self.connection.prepare(&format!(
             "SELECT uuid, finish, amount_cents, currency, as_of_date
-             FROM reference_prices
+             FROM reference_prices {scope}
              ORDER BY uuid,
                       CASE finish WHEN 'normal' THEN 0 WHEN 'foil' THEN 1 ELSE 2 END",
-        )?;
+        ))?;
         let mut rows = statement.query([])?;
         let mut prices = Vec::new();
 
@@ -506,6 +617,7 @@ impl CollectionStore {
                 "invalid reference update date: {date}"
             )));
         }
+        let _writer = self.lock_writer()?;
         self.connection.execute(
             "INSERT INTO reference_update_state (singleton, last_successful_date)
              VALUES (1, ?1)
@@ -515,11 +627,15 @@ impl CollectionStore {
         Ok(())
     }
 
-    fn load_catalog_facets(&self) -> Result<HashMap<String, CatalogFacets>, StorageError> {
-        let mut statement = self.connection.prepare(
+    fn load_catalog_facets(
+        &self,
+        selected_only: bool,
+    ) -> Result<HashMap<String, CatalogFacets>, StorageError> {
+        let scope = reference_scope("card_uuid", selected_only);
+        let mut statement = self.connection.prepare(&format!(
             "SELECT card_uuid, kind, value
-             FROM catalog_facets ORDER BY card_uuid, kind, position",
-        )?;
+             FROM catalog_facets {scope} ORDER BY card_uuid, kind, position",
+        ))?;
         let mut rows = statement.query([])?;
         let mut facets = HashMap::<String, CatalogFacets>::new();
         while let Some(row) = rows.next()? {
@@ -728,6 +844,73 @@ impl Error for StorageError {
 impl From<rusqlite::Error> for StorageError {
     fn from(error: rusqlite::Error) -> Self {
         Self::Sqlite(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        fs,
+        sync::{TryLockError, mpsc},
+        thread,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    #[test]
+    fn concurrent_writers_wait_before_attempting_sqlite() -> Result<(), Box<dyn Error>> {
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "dicomtg-writer-{}-{unique}.sqlite",
+            std::process::id()
+        ));
+        let mut primary = CollectionStore::open(&path)?;
+        let id =
+            primary.create_collection("Avant", &CollectionSnapshot::new(vec![], vec![], vec![]))?;
+        let mut peer = primary.open_peer()?;
+        assert_eq!(
+            peer.connection
+                .query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))?,
+            "wal"
+        );
+        assert_eq!(
+            peer.connection
+                .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, u32>(0))?,
+            5_000
+        );
+        peer.connection.busy_timeout(Duration::ZERO)?;
+
+        let (slot, transaction) = primary.begin_write()?;
+        let (ready, contended) = mpsc::sync_channel(0);
+        thread::scope(|scope| -> Result<(), Box<dyn Error>> {
+            let waiting = scope.spawn(move || {
+                let error = peer
+                    .connection
+                    .execute("UPDATE collections SET selected = 0", [])
+                    .expect_err("an uncoordinated write must hit the active writer");
+                assert_eq!(
+                    error.sqlite_error_code(),
+                    Some(rusqlite::ErrorCode::DatabaseBusy)
+                );
+                assert!(matches!(
+                    peer.writer.try_lock(),
+                    Err(TryLockError::WouldBlock)
+                ));
+                ready
+                    .send(())
+                    .expect("the first writer must still be running");
+                peer.rename_collection(id, "Après")
+            });
+            contended.recv()?;
+            transaction.commit()?;
+            drop(slot);
+            waiting.join().expect("writer thread must finish")?;
+            Ok(())
+        })?;
+        assert_eq!(primary.collections()?[0].name(), "Après");
+        drop(primary);
+        fs::remove_file(path)?;
+        Ok(())
     }
 }
 

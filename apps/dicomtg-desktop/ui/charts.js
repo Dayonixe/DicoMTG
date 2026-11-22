@@ -100,6 +100,22 @@ export function filterTypeItems(
   });
 }
 
+export function typeAnalysisFromCards(cards, selectedType) {
+  const asciiLower = (type) => type.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+  const selected = asciiLower(selectedType);
+  const items = cards.filter((card) =>
+    card.status === "matched" && card.types.some((type) => asciiLower(type) === selected),
+  );
+  // Match the order of the Rust type analysis when counts are tied.
+  const byQuantity = (a, b) => b.quantity - a.quantity || (a.label > b.label) - (a.label < b.label);
+  return {
+    selectedType,
+    items,
+    colors: overviewDistribution(items, "colors").sort(byQuantity),
+    manaValues: overviewDistribution(items, "manaValues").sort(byQuantity),
+  };
+}
+
 export function filterOverviewItems(items, filters = {}, ignoredKind = null) {
   const active = ["colors", "types", "manaValues"].some(
     (kind) => kind !== ignoredKind && (filters[kind]?.length ?? 0) > 0,

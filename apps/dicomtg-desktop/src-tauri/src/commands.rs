@@ -22,8 +22,8 @@ use serde::{Deserialize, Serialize};
 use tauri::{State, ipc::Response};
 
 pub struct AppState {
-    store: Mutex<CollectionStore>,
-    database_path: PathBuf,
+    store: Arc<Mutex<CollectionStore>>,
+    collection_writer: Arc<Mutex<CollectionStore>>,
     update_directory: PathBuf,
     image_directory: PathBuf,
     image_cache_lock: Mutex<()>,
@@ -34,13 +34,13 @@ pub struct AppState {
 impl AppState {
     pub fn new(
         store: CollectionStore,
-        database_path: PathBuf,
+        collection_writer: CollectionStore,
         update_directory: PathBuf,
         image_directory: PathBuf,
     ) -> Self {
         Self {
-            store: Mutex::new(store),
-            database_path,
+            store: Arc::new(Mutex::new(store)),
+            collection_writer: Arc::new(Mutex::new(collection_writer)),
             update_directory,
             image_directory,
             image_cache_lock: Mutex::new(()),
@@ -233,9 +233,12 @@ pub(crate) fn build_dashboard(
     store: &CollectionStore,
     query: DashboardQuery,
 ) -> Result<DashboardDto, String> {
-    let collection = store.load_collection().map_err(|error| error.to_string())?;
-    let catalog = store.load_catalog().map_err(|error| error.to_string())?;
-    let prices = store.load_prices().map_err(|error| error.to_string())?;
+    let (collection, catalog, prices) = store
+        .load_collection_with_references()
+        .map_err(|error| error.to_string())?;
+    let (catalog_cards, reference_prices) = store
+        .reference_counts()
+        .map_err(|error| error.to_string())?;
     let metrics =
         analyze_collection(&collection, &catalog, &prices).map_err(|error| error.to_string())?;
     let diagnostics = build_diagnostics(&collection);
@@ -270,8 +273,8 @@ pub(crate) fn build_dashboard(
             total_quantity: metrics.total_quantity(),
             distinct_names: metrics.distinct_names(),
             total_value_cents: metrics.total_value_cents(),
-            catalog_cards: catalog.len(),
-            reference_prices: prices.len(),
+            catalog_cards,
+            reference_prices,
             matched_printings: metrics.matched_printings(),
             priced_printings: metrics.priced_printings(),
             unpriced_printings: metrics.unpriced_printings(),
@@ -293,9 +296,9 @@ pub(crate) fn build_type_analysis(
         return Err("card type is required".to_owned());
     }
 
-    let collection = store.load_collection().map_err(|error| error.to_string())?;
-    let catalog = store.load_catalog().map_err(|error| error.to_string())?;
-    let prices = store.load_prices().map_err(|error| error.to_string())?;
+    let (collection, catalog, prices) = store
+        .load_collection_with_references()
+        .map_err(|error| error.to_string())?;
     let metrics = analyze_collection_by_type(&collection, &catalog, &prices, selected_type)
         .map_err(|error| error.to_string())?;
     let query = CollectionQuery::default().with_types(vec![selected_type.to_owned()]);
@@ -548,16 +551,27 @@ pub fn load_type_analysis(
     build_type_analysis(&store, &card_type)
 }
 
-#[tauri::command(async)]
-pub fn import_collection(
+async fn write_collection<T: Send + 'static>(
+    state: &AppState,
+    operation: impl FnOnce(&mut CollectionStore) -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    let writer = Arc::clone(&state.collection_writer);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut store = writer
+            .lock()
+            .map_err(|_| "local database lock is poisoned".to_owned())?;
+        operation(&mut store)
+    })
+    .await
+    .map_err(|error| format!("Échec de la tâche d’écriture : {error}"))?
+}
+
+#[tauri::command]
+pub async fn import_collection(
     state: State<'_, AppState>,
     csv: String,
 ) -> Result<ImportSummaryDto, String> {
-    let mut store = state
-        .store
-        .lock()
-        .map_err(|_| "local database lock is poisoned".to_owned())?;
-    import_collection_csv(&mut store, &csv)
+    write_collection(&state, move |store| import_collection_csv(store, &csv)).await
 }
 
 #[tauri::command(async)]
@@ -569,58 +583,56 @@ pub fn list_collections(state: State<'_, AppState>) -> Result<Vec<ManagedCollect
     managed_collections(&store)
 }
 
-#[tauri::command(async)]
-pub fn create_collection(
+#[tauri::command]
+pub async fn create_collection(
     state: State<'_, AppState>,
     name: String,
     csv: String,
 ) -> Result<ImportSummaryDto, String> {
-    let mut store = state
-        .store
-        .lock()
-        .map_err(|_| "local database lock is poisoned".to_owned())?;
-    create_collection_csv(&mut store, &name, &csv)
+    write_collection(&state, move |store| {
+        create_collection_csv(store, &name, &csv)
+    })
+    .await
 }
 
-#[tauri::command(async)]
-pub fn update_collection(
+#[tauri::command]
+pub async fn update_collection(
     state: State<'_, AppState>,
     collection_id: i64,
     csv: String,
 ) -> Result<ImportSummaryDto, String> {
-    let mut store = state
-        .store
-        .lock()
-        .map_err(|_| "local database lock is poisoned".to_owned())?;
-    update_collection_csv(&mut store, collection_id, &csv)
+    write_collection(&state, move |store| {
+        update_collection_csv(store, collection_id, &csv)
+    })
+    .await
 }
 
-#[tauri::command(async)]
-pub fn rename_collection(
+#[tauri::command]
+pub async fn rename_collection(
     state: State<'_, AppState>,
     collection_id: i64,
     name: String,
 ) -> Result<(), String> {
-    state
-        .store
-        .lock()
-        .map_err(|_| "local database lock is poisoned".to_owned())?
-        .rename_collection(collection_id, &name)
-        .map_err(|error| error.to_string())
+    write_collection(&state, move |store| {
+        store
+            .rename_collection(collection_id, &name)
+            .map_err(|error| error.to_string())
+    })
+    .await
 }
 
-#[tauri::command(async)]
-pub fn set_collection_selected(
+#[tauri::command]
+pub async fn set_collection_selected(
     state: State<'_, AppState>,
     collection_id: i64,
     selected: bool,
 ) -> Result<(), String> {
-    state
-        .store
-        .lock()
-        .map_err(|_| "local database lock is poisoned".to_owned())?
-        .set_collection_selected(collection_id, selected)
-        .map_err(|error| error.to_string())
+    write_collection(&state, move |store| {
+        store
+            .set_collection_selected(collection_id, selected)
+            .map_err(|error| error.to_string())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -653,24 +665,28 @@ pub async fn update_reference_data(
         });
     }
 
-    let database_path = state.database_path.clone();
+    let primary_store = Arc::clone(&state.store);
     let update_directory = state.update_directory.clone();
     let running = Arc::clone(&state.reference_update_running);
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = ReferenceUpdateGuard(running);
-        refresh_reference_data(&database_path, &update_directory, &local_date, force)
+        let mut store = primary_store
+            .lock()
+            .map_err(|_| "local database lock is poisoned".to_owned())?
+            .open_peer()
+            .map_err(|error| error.to_string())?;
+        refresh_reference_data(&mut store, &update_directory, &local_date, force)
     })
     .await
     .map_err(|error| format!("Échec de la tâche d’actualisation : {error}"))?
 }
 
 fn refresh_reference_data(
-    database_path: &PathBuf,
+    store: &mut CollectionStore,
     update_directory: &PathBuf,
     local_date: &str,
     force: bool,
 ) -> Result<ReferenceUpdateDto, String> {
-    let mut store = CollectionStore::open(database_path).map_err(|error| error.to_string())?;
     if !reference_update_due(
         store
             .last_reference_update_date()
@@ -679,23 +695,20 @@ fn refresh_reference_data(
         local_date,
         force,
     ) {
+        let (catalog_cards, reference_prices) = store
+            .reference_counts()
+            .map_err(|error| error.to_string())?;
         return Ok(ReferenceUpdateDto {
             status: "current",
-            catalog_cards: store
-                .load_catalog()
-                .map_err(|error| error.to_string())?
-                .len(),
-            reference_prices: store
-                .load_prices()
-                .map_err(|error| error.to_string())?
-                .len(),
+            catalog_cards,
+            reference_prices,
             update_date: local_date.to_owned(),
         });
     }
 
-    let catalog = update_catalog_from_mtgjson(&mut store, update_directory)
+    let catalog = update_catalog_from_mtgjson(store, update_directory)
         .map_err(|error| format!("Échec de l’actualisation du catalogue : {error}"))?;
-    let prices = update_prices_from_cardmarket(&mut store, update_directory)
+    let prices = update_prices_from_cardmarket(store, update_directory)
         .map_err(|error| format!("Échec de l’actualisation des prix : {error}"))?;
     let candidates = store
         .load_catalog()
@@ -713,11 +726,13 @@ fn refresh_reference_data(
         let collection = store
             .load_collection_by_id(collection_id)
             .map_err(|error| error.to_string())?;
-        let collection = rematch_collection(collection, &candidates)
+        let replacement = rematch_collection(collection.clone(), &candidates)
             .map_err(|error| format!("Échec du réappariement : {error}"))?;
-        store
-            .replace_collection_for(collection_id, &collection)
-            .map_err(|error| error.to_string())?;
+        if replacement != collection {
+            store
+                .replace_collection_if_unchanged(collection_id, &collection, &replacement)
+                .map_err(|error| error.to_string())?;
+        }
     }
     store
         .set_last_reference_update_date(local_date)
@@ -891,11 +906,20 @@ mod tests {
         ))?;
         let collection = build_collection(report, &candidates)?;
         let prices = import_mtgjson_prices_json(Cursor::new(
-            r#"{"data":{"admonition-uuid":{"paper":{"cardmarket":{"currency":"EUR","retail":{"normal":{"2026-11-15":1.25}}}}}}}"#,
+            r#"{"data":{"admonition-uuid":{"paper":{"cardmarket":{"currency":"EUR","retail":{"normal":{"2026-11-15":1.25},"foil":{"2026-11-15":2.50}}}}},"split-uuid":{"paper":{"cardmarket":{"currency":"EUR","retail":{"normal":{"2026-11-15":1.00}}}}}}}"#,
         ))?;
         store.replace_catalog(&catalog)?;
         store.replace_collection(&collection)?;
         store.replace_prices(&prices)?;
+        let other_report = import_dragonshield_csv(Cursor::new(
+            "Quantity,Card Name,Set Code,Card Number\n3,Who What,TST,001a\n",
+        ))?;
+        let other_id =
+            store.create_collection("Autre", &build_collection(other_report, &candidates)?)?;
+        store.set_collection_selected(other_id, false)?;
+        let (_, selected_cards, selected_prices) = store.load_collection_with_references()?;
+        assert_eq!(selected_cards.len(), 1);
+        assert_eq!(selected_prices.len(), 2);
 
         let dashboard = build_dashboard(&store, DashboardQuery::default())?;
 
@@ -917,6 +941,7 @@ mod tests {
         assert_eq!(dashboard.items[0].name, "Admonition Angel");
         assert_eq!(dashboard.items[0].finish, "normal");
         assert_eq!(dashboard.items[0].price_cents, Some(125));
+        assert_eq!(dashboard.items[0].foil_price_cents, Some(250));
         assert_eq!(dashboard.items[0].status, "matched");
         assert_eq!(dashboard.items[0].color_identity, ["W"]);
         assert_eq!(dashboard.items[0].types, ["Creature"]);
@@ -1063,9 +1088,10 @@ mod tests {
             "Collection de Léa",
             "Quantity,Card Name,Set Code,Card Number\n2,Unknown card,TST,1\n",
         )?;
-        let friend_id = store.collections()?[1].id();
+        let friend_id = store.collections()?[0].id();
 
         assert_eq!(summary.total_quantity, 2);
+        assert_eq!(store.collections()?.len(), 1);
         assert_eq!(store.load_collection()?.unresolved()[0].quantity(), 2);
 
         update_collection_csv(
@@ -1074,7 +1100,6 @@ mod tests {
             "Quantity,Card Name,Set Code,Card Number\n4,Replacement,TST,2\n",
         )?;
 
-        assert_eq!(store.load_collection_by_id(1)?.unresolved().len(), 0);
         assert_eq!(
             store.load_collection_by_id(friend_id)?.unresolved()[0].name(),
             "Replacement"

@@ -14,7 +14,31 @@ import {
   overviewMetrics,
   orderedManaEntries,
   selectableTypeEntries,
+  typeAnalysisFromCards,
 } from "./charts.js";
+
+test("builds type analysis from the full snapshot with the same filtering and ranked charts", () => {
+  const creature = { status: "matched", types: ["Artifact", "Creature"], colors: ["W"], manaValue: 2, quantity: 3 };
+  const otherCreature = { ...creature, types: ["creature"], colors: ["B"], manaValue: 0 };
+  const colorless = { ...creature, colors: [], manaValue: 0, quantity: 1 };
+  const analysis = typeAnalysisFromCards([
+    creature,
+    { ...creature, status: "unmatched" },
+    otherCreature,
+    { ...creature, types: ["Land"] },
+    colorless,
+  ], "Creature");
+  assert.deepEqual(analysis.items, [creature, otherCreature, colorless]);
+  assert.deepEqual(analysis.colors, [
+    { label: "B", quantity: 3 },
+    { label: "W", quantity: 3 },
+    { label: "C", quantity: 1 },
+  ]);
+  assert.deepEqual(analysis.manaValues, [
+    { label: "0", quantity: 4 },
+    { label: "2", quantity: 3 },
+  ]);
+});
 
 test("groups the donut tail without losing quantity", () => {
   const entries = Array.from({ length: 10 }, (_, index) => ({

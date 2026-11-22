@@ -17,17 +17,6 @@
   <body>
     <a class="skip-link" href="#main-content">Aller au contenu</a>
 
-    <header class="app-header">
-      <div>
-        <p class="eyebrow">Collection locale</p>
-        <h1>DicoMTG</h1>
-      </div>
-      <p class="header-copy">
-        Vos cartes, leur valeur et les données à corriger — sans publication de
-        votre collection.
-      </p>
-    </header>
-
     <nav class="app-nav" aria-label="Vues de la collection">
       <div class="app-nav-scroll">
         <a href="#overview" data-nav-page="overview" aria-current="page">Vue d’ensemble</a>
@@ -37,7 +26,7 @@
         <a href="#sets" data-nav-page="sets">Extensions</a>
         <a href="#rarities" data-nav-page="rarities">Raretés</a>
         <a href="#collection" data-nav-page="collection">Cartes</a>
-        <a href="#deck" data-nav-page="deck">Deck Builder</a>
+        <a href="#deck" data-nav-page="deck">Construction de deck</a>
         <a href="#data" data-nav-page="data">Données</a>
       </div>
     </nav>
@@ -55,7 +44,6 @@
       >
         <div class="page-heading">
           <div>
-            <p class="eyebrow">Statistics</p>
             <h2 id="overview-title">Vue d’ensemble</h2>
           </div>
           <p class="page-intro">Les indicateurs essentiels de votre collection.</p>
@@ -168,7 +156,6 @@
       >
         <div class="page-heading">
           <div>
-            <p class="eyebrow">Card view</p>
             <h2 id="card-detail-title" tabindex="-1">Fiche carte</h2>
           </div>
           <a class="secondary-action" href="#collection">Choisir une carte</a>
@@ -220,7 +207,6 @@
       >
         <div class="page-heading">
           <div>
-            <p class="eyebrow">Type</p>
             <h2 id="types-title">Répartition par type</h2>
           </div>
           <div class="type-selector">
@@ -276,6 +262,7 @@
             <h3 id="type-cards-title">Cartes correspondantes</h3>
             <div class="analysis-result-controls">
               <p id="type-result-summary" class="result-summary">Chargement…</p>
+              <button class="table-export" type="button" data-export-table="type-analysis-rows" disabled>Exporter en CSV</button>
               <button
                 id="reset-type-chart-filters"
                 class="analysis-reset-filters"
@@ -286,7 +273,7 @@
               </button>
             </div>
           </div>
-          <div class="table-shell" tabindex="0" aria-label="Cartes du type sélectionné">
+          <div class="table-shell virtual-table" tabindex="0" aria-label="Cartes du type sélectionné">
             <table data-sort-keys="name,setCode,quantity,colors,manaValue">
               <thead>
                 <tr>
@@ -317,7 +304,6 @@
       >
         <div class="page-heading">
           <div>
-            <p class="eyebrow">Keyword</p>
             <h2 id="keywords-title">Répartition par mot-clé</h2>
           </div>
           <p class="page-intro">Capacités présentes dans votre collection.</p>
@@ -364,6 +350,7 @@
             <h3 id="keywords-cards-title">Cartes correspondantes</h3>
             <div class="analysis-result-controls">
               <p id="keywords-result-summary" class="result-summary">Chargement…</p>
+              <button class="table-export" type="button" data-export-table="keywords-analysis-rows" disabled>Exporter en CSV</button>
               <button
                 id="reset-keywords-chart-filters"
                 class="analysis-reset-filters"
@@ -374,7 +361,7 @@
               </button>
             </div>
           </div>
-          <div class="table-shell" tabindex="0" aria-label="Cartes des mots-clés sélectionnés">
+          <div class="table-shell virtual-table" tabindex="0" aria-label="Cartes des mots-clés sélectionnés">
             <table data-sort-keys="name,setCode,quantity,colors,manaValue">
               <thead>
                 <tr>
@@ -403,7 +390,6 @@
       >
         <div class="page-heading">
           <div>
-            <p class="eyebrow">Set</p>
             <h2 id="sets-title">Répartition par extension</h2>
           </div>
           <p class="page-intro">Quantités possédées pour chaque édition.</p>
@@ -450,6 +436,7 @@
             <h3 id="sets-cards-title">Cartes correspondantes</h3>
             <div class="analysis-result-controls">
               <p id="sets-result-summary" class="result-summary">Chargement…</p>
+              <button class="table-export" type="button" data-export-table="sets-analysis-rows" disabled>Exporter en CSV</button>
               <button
                 id="reset-sets-chart-filters"
                 class="analysis-reset-filters"
@@ -460,7 +447,7 @@
               </button>
             </div>
           </div>
-          <div class="table-shell" tabindex="0" aria-label="Cartes des extensions sélectionnées">
+          <div class="table-shell virtual-table" tabindex="0" aria-label="Cartes des extensions sélectionnées">
             <table data-sort-keys="name,setCode,quantity,colors,manaValue">
               <thead>
                 <tr>
@@ -489,7 +476,6 @@
       >
         <div class="page-heading">
           <div>
-            <p class="eyebrow">Rarity</p>
             <h2 id="rarities-title">Répartition par rareté</h2>
           </div>
           <p class="page-intro">Structure de la collection par niveau de rareté.</p>
@@ -536,6 +522,7 @@
             <h3 id="rarities-cards-title">Cartes correspondantes</h3>
             <div class="analysis-result-controls">
               <p id="rarities-result-summary" class="result-summary">Chargement…</p>
+              <button class="table-export" type="button" data-export-table="rarities-analysis-rows" disabled>Exporter en CSV</button>
               <button
                 id="reset-rarities-chart-filters"
                 class="analysis-reset-filters"
@@ -546,7 +533,7 @@
               </button>
             </div>
           </div>
-          <div class="table-shell" tabindex="0" aria-label="Cartes des raretés sélectionnées">
+          <div class="table-shell virtual-table" tabindex="0" aria-label="Cartes des raretés sélectionnées">
             <table data-sort-keys="name,setCode,quantity,colors,manaValue">
               <thead>
                 <tr>
@@ -575,10 +562,12 @@
       >
         <div class="page-heading">
           <div>
-            <p class="eyebrow">List of cards</p>
             <h2 id="collection-title">Liste des cartes</h2>
           </div>
-          <p id="result-summary" class="result-summary">Chargement…</p>
+          <div class="analysis-result-controls">
+            <p id="result-summary" class="result-summary">Chargement…</p>
+            <button class="table-export" type="button" data-export-table="collection-rows" disabled>Exporter en CSV</button>
+          </div>
         </div>
 
         <form id="filters" class="filters">
@@ -620,8 +609,8 @@
           <button id="apply-filters" type="submit">Appliquer</button>
         </form>
 
-        <div class="table-shell" tabindex="0" aria-label="Tableau de la collection">
-          <table data-sort-keys="name,setCode,collectorNumber,quantity,finish,rarity,colors,manaValue,priceCents,status">
+        <div id="collection-table-shell" class="table-shell virtual-table" tabindex="0" aria-label="Tableau de la collection">
+          <table data-sort-keys="name,setCode,collectorNumber,quantity,finish,rarity,colors,manaValue,priceCents">
             <caption class="sr-only">Cartes de la collection correspondant aux filtres</caption>
             <thead>
               <tr>
@@ -634,12 +623,11 @@
                 <th scope="col">Couleurs</th>
                 <th scope="col">Mana</th>
                 <th scope="col">Prix</th>
-                <th scope="col">Statut</th>
               </tr>
             </thead>
             <tbody id="collection-rows">
               <tr>
-                <td colspan="10" class="empty-state">Chargement de la collection…</td>
+                <td colspan="9" class="empty-state">Chargement de la collection…</td>
               </tr>
             </tbody>
           </table>
@@ -650,13 +638,12 @@
         id="deck"
         class="app-page"
         data-page="deck"
-        data-page-title="Deck Builder"
+        data-page-title="Aide à la construction de deck"
         aria-labelledby="deck-title"
         hidden
       >
         <div class="page-heading">
           <div>
-            <p class="eyebrow">Help Deck Builder</p>
             <h2 id="deck-title">Aide à la construction de deck</h2>
           </div>
           <p class="page-intro">
@@ -784,7 +771,6 @@
       >
         <div class="page-heading">
           <div>
-            <p class="eyebrow">Maintenance locale</p>
             <h2 id="data-title">Données et diagnostics</h2>
           </div>
           <p class="page-intro">Actualisez les sources puis importez votre export DragonShield.</p>
@@ -806,7 +792,6 @@
         <section class="reference-panel" aria-labelledby="reference-title">
           <div class="reference-layout">
             <div class="reference-copy">
-              <p class="eyebrow">Référentiel</p>
               <h3 id="reference-title">Catalogue et prix</h3>
               <p>
                 Actualisez le catalogue et les prix. Les dernières données valides
@@ -838,7 +823,6 @@
         <section class="cache-panel" aria-labelledby="image-cache-title">
           <div class="cache-layout">
             <div class="cache-copy">
-              <p class="eyebrow">Stockage local</p>
               <h3 id="image-cache-title">Cache des illustrations</h3>
               <p>
                 Les aperçus consultés sont conservés pour accélérer les affichages.
@@ -859,7 +843,6 @@
         <section class="collections-panel" aria-labelledby="managed-collections-title">
           <div class="section-heading">
             <div>
-              <p class="eyebrow">Collections affichées</p>
               <h3 id="managed-collections-title">Mes imports DragonShield</h3>
             </div>
             <p class="result-summary">Cochez les collections à fusionner dans les analyses.</p>
@@ -874,7 +857,6 @@
         <section class="import-panel" aria-labelledby="import-title">
           <div class="import-layout">
             <div class="import-copy">
-              <p class="eyebrow">Import local</p>
               <h3 id="import-title">Ajouter une collection</h3>
               <p>
                 Nommez l’export CSV complet de DragonShield, puis choisissez un
@@ -951,7 +933,6 @@
         <section class="diagnostics-panel" aria-labelledby="diagnostics-title">
           <div class="section-heading">
             <div>
-              <p class="eyebrow">Qualité des données</p>
               <h3 id="diagnostics-title">Diagnostics de la collection</h3>
             </div>
             <p id="diagnostics-summary" class="result-summary">Chargement…</p>
