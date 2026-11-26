@@ -354,7 +354,7 @@ fn is_jpeg(bytes: &[u8]) -> bool {
     bytes.starts_with(&[0xff, 0xd8, 0xff]) && bytes.ends_with(&[0xff, 0xd9])
 }
 
-fn is_scryfall_id(value: &str) -> bool {
+pub(crate) fn is_scryfall_id(value: &str) -> bool {
     let bytes = value.as_bytes();
     bytes.len() == 36
         && bytes.iter().enumerate().all(|(index, byte)| match index {

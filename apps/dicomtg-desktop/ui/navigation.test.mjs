@@ -267,6 +267,222 @@ test("groups the card detail by name and removes printing-specific facts", () =>
   assert.doesNotMatch(script, /\["Langue"|Prix de référence|Date du prix/);
 });
 
+test("keeps the rules panel text-only and prefers French rules to received English text", async () => {
+  const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");
+  const rules = html.slice(
+    html.indexOf('aria-labelledby="card-detail-rules-title"'),
+    html.indexOf('aria-labelledby="card-detail-printings-title"'),
+  );
+  assert.match(rules, /id="card-detail-rules"/);
+  assert.doesNotMatch(rules, /<img\b|Texte français sur la carte imprimée/);
+
+  const script = readFileSync(new URL("./app.js", import.meta.url), "utf8");
+  const localize = script.slice(
+    script.indexOf("function loadAlternateFrenchText("),
+    script.indexOf("function renderEdhrecGauge("),
+  );
+  for (const frenchText of [null, "Piochez une carte."]) {
+    const printings = ["128", "335"].map((collectorNumber) => ({
+      item: { uuid: "owned-printing", setCode: "EOE", collectorNumber },
+      setName: {},
+    }));
+    const shownTexts = [];
+    let finishSecondPrinting;
+    let finishAlternateLookup;
+    const localization = runInNewContext(localize + "\nlocalizeCardDetail(printings, 1);", {
+      printings,
+      cardDetailRequestId: 1,
+      cardDetailRules: {},
+      setManaSymbolText: (_node, text) => shownTexts.push(text),
+      alternateFrenchTextRequests: new Map(),
+      invoke: async (command, { collectorNumber, oracleId }) => {
+        if (command === "load_card_french_text") {
+          assert.equal(oracleId, "card-id");
+          return new Promise((resolve) => {
+            finishAlternateLookup = () => resolve("Piochez deux cartes.");
+          });
+        }
+        if (collectorNumber === "335") {
+          return new Promise((resolve) => {
+            finishSecondPrinting = () => resolve({ setName: "Edge of Eternities", frenchText });
+          });
+        }
+        return { setName: "Edge of Eternities", fallbackText: "Draw a card.", oracleId: "card-id" };
+      },
+    });
+    await new Promise(setImmediate);
+    assert.deepEqual(shownTexts, ["Draw a card."]);
+    if (frenchText) {
+      finishSecondPrinting();
+      await new Promise(setImmediate);
+      finishAlternateLookup();
+    } else {
+      finishAlternateLookup();
+      await new Promise(setImmediate);
+      assert.deepEqual(shownTexts, ["Draw a card.", "Piochez deux cartes."]);
+      finishSecondPrinting();
+    }
+    await localization;
+
+    assert.deepEqual(shownTexts, ["Draw a card.", frenchText ?? "Piochez deux cartes."]);
+  }
+});
+
+test("looks for other French printings only once per card across repeated visits", async () => {
+  const script = readFileSync(new URL("./app.js", import.meta.url), "utf8");
+  const localize = script.slice(
+    script.indexOf("function loadAlternateFrenchText("),
+    script.indexOf("function renderEdhrecGauge("),
+  );
+  const printings = ["128", "335", "128s"].map((collectorNumber) => ({
+    item: { setCode: "EOE", collectorNumber },
+    setName: {},
+  }));
+  const searches = [];
+  const texts = [];
+  await runInNewContext(
+    localize + "\n(async () => { await localizeCardDetail(printings, 1); await localizeCardDetail(printings, 1); })();",
+    {
+      printings,
+      cardDetailRequestId: 1,
+      cardDetailRules: {},
+      alternateFrenchTextRequests: new Map(),
+      setManaSymbolText: (_node, text) => texts.push(text),
+      invoke: async (command, payload) => {
+        if (command === "load_card_french_text") {
+          searches.push(payload.oracleId);
+          return "Piochez une carte.";
+        }
+        return { setName: "Edge of Eternities", oracleId: "card-id" };
+      },
+    },
+  );
+  assert.deepEqual(searches, ["card-id"]);
+  assert.deepEqual(texts, ["Piochez une carte.", "Piochez une carte."]);
+});
+
+test("displays the EDHREC gauges with independent values and the actual rank", async () => {
+  const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");
+  const script = readFileSync(new URL("./app.js", import.meta.url), "utf8");
+  const gauges = script.slice(
+    script.indexOf("function renderEdhrecGauge("),
+    script.indexOf("function showCardDetail("),
+  );
+  assert.match(html, /id="card-edhrec-salt"[\s\S]*?pathLength="1"/);
+  assert.match(html, /id="card-edhrec-rank"[\s\S]*?pathLength="1"/);
+  assert.match(html, /<h3>Ratio de classement<\/h3>/);
+
+  function gauge() {
+    const value = {};
+    const fill = {};
+    return {
+      value,
+      fill,
+      querySelector(selector) {
+        return selector === "[data-gauge-fill]"
+          ? { setAttribute: (name, text) => { fill[name] = text; } }
+          : value;
+      },
+      toggleAttribute(_name, empty) { this.empty = empty; },
+    };
+  }
+
+  for (const [stats, saltText, rankText] of [
+    [{ saltScore: 2.38, rank: 188, rankRatio: 0.813 }, "2,38", "0,813"],
+    [{ saltScore: 0, rank: null, rankRatio: null }, "0", "Indisponible"],
+    [{ saltScore: null, rank: 1001, rankRatio: 0 }, "Indisponible", "0,000"],
+    [{ saltScore: 4, rank: 1, rankRatio: 1 }, "4", "1,000"],
+  ]) {
+    const cardEdhrecSalt = gauge();
+    const cardEdhrecRank = gauge();
+    const cardEdhrecRankPosition = {};
+    const invoke = async (command, { uuid }) => {
+      assert.equal(command, "load_card_edhrec_stats");
+      assert.equal(uuid, "printing-id");
+      return stats;
+    };
+    await runInNewContext(gauges + '\nloadCardEdhrecStats("printing-id", 1);', {
+      cardDetailRequestId: 1,
+      cardEdhrecLookupId: 0,
+      cardEdhrecSalt,
+      cardEdhrecRank,
+      cardEdhrecRankPosition,
+      formatCount: String,
+      invoke,
+    });
+    assert.equal(cardEdhrecSalt.value.textContent, saltText);
+    assert.equal(cardEdhrecSalt.empty, stats.saltScore == null);
+    assert.equal(cardEdhrecSalt.fill["stroke-dasharray"], `${(stats.saltScore ?? 0) / 4} 1`);
+    assert.equal(cardEdhrecRank.value.textContent, rankText);
+    assert.equal(cardEdhrecRank.empty, stats.rankRatio == null);
+    assert.equal(cardEdhrecRank.fill["stroke-dasharray"], `${stats.rankRatio ?? 0} 1`);
+    assert.equal(cardEdhrecRankPosition.textContent, stats.rank == null ? "" : `n° ${stats.rank}`);
+    if (stats.saltScore === 0) assert.match(cardEdhrecSalt.fill.stroke, /^hsl\(120,/);
+    if (stats.saltScore === 4) assert.match(cardEdhrecSalt.fill.stroke, /^hsl\(0,/);
+    if (stats.rankRatio === 0) assert.match(cardEdhrecRank.fill.stroke, /^hsl\(0,/);
+    if (stats.rankRatio === 1) assert.match(cardEdhrecRank.fill.stroke, /^hsl\(120,/);
+  }
+});
+
+test("refreshes the open card when the catalogue arrives even if the price update fails", async () => {
+  const script = readFileSync(new URL("./app.js", import.meta.url), "utf8");
+  const refresh = script.slice(
+    script.indexOf("async function refreshReferenceData("),
+    script.indexOf('referenceButton.addEventListener("click"'),
+  );
+  const events = [];
+  let catalogReady;
+  let rejectPrices;
+  const update = runInNewContext(refresh + "\nrefreshReferenceData(false);", {
+    appUpdater: {},
+    referenceButton: {},
+    clearReferenceError() {},
+    referenceResult: {},
+    setReferenceLoading() {},
+    statusRegion: {},
+    todayLocalIso: () => "2026-11-26",
+    tauriCore: { Channel: class {} },
+    invoke(command, payload) {
+      assert.equal(command, "update_reference_data");
+      catalogReady = payload.catalogReady;
+      return new Promise((_resolve, reject) => { rejectPrices = reject; });
+    },
+    refreshCardDetailEdhrecStats() { events.push("card refreshed"); },
+    loadDashboard() {},
+    showReferenceError() { events.push("price update failed"); },
+  });
+
+  catalogReady.onmessage(null);
+  assert.deepEqual(events, ["card refreshed"]);
+  rejectPrices(new Error("Prix indisponibles"));
+  await update;
+  assert.deepEqual(events, ["card refreshed", "price update failed"]);
+});
+
+test("a late EDHREC response cannot clear an updated card", async () => {
+  const script = readFileSync(new URL("./app.js", import.meta.url), "utf8");
+  const lookup = script.slice(
+    script.indexOf("async function loadCardEdhrecStats("),
+    script.indexOf("function showCardDetail("),
+  );
+  const requests = [];
+  const rendered = [];
+  const completed = runInNewContext(
+    lookup + '\nPromise.all([loadCardEdhrecStats("id", 1), loadCardEdhrecStats("id", 1)]);',
+    {
+      cardDetailRequestId: 1,
+      cardEdhrecLookupId: 0,
+      invoke: () => new Promise((resolve) => requests.push(resolve)),
+      renderCardEdhrecStats: (stats) => rendered.push(stats.rank),
+    },
+  );
+
+  requests[1]({ rank: 5679 });
+  requests[0]({ rank: null });
+  await completed;
+  assert.deepEqual(rendered, [5679]);
+});
+
 test("renders card colors and mana costs with official symbol images", () => {
   const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");
   const script = readFileSync(new URL("./app.js", import.meta.url), "utf8");

@@ -188,6 +188,30 @@
         <article id="card-detail-content" class="card-detail" hidden>
           <div class="card-detail-data">
             <dl id="card-detail-facts" class="card-detail-grid"></dl>
+            <section class="card-edhrec-gauges" aria-label="Indicateurs EDHREC">
+              <article id="card-edhrec-salt" class="card-edhrec-gauge" data-empty>
+                <h3>Salt Score</h3>
+                <div class="card-edhrec-dial">
+                  <svg viewBox="0 0 224 112" aria-hidden="true">
+                    <path class="card-edhrec-track" d="M 16 112 A 96 96 0 0 1 208 112"></path>
+                    <path data-gauge-fill d="M 16 112 A 96 96 0 0 1 208 112" pathLength="1" stroke-dasharray="0 1"></path>
+                  </svg>
+                  <output data-gauge-value aria-label="Salt Score EDHREC">Indisponible</output>
+                </div>
+                <p>sur 4</p>
+              </article>
+              <article id="card-edhrec-rank" class="card-edhrec-gauge" data-empty>
+                <h3>Ratio de classement</h3>
+                <div class="card-edhrec-dial">
+                  <svg viewBox="0 0 224 112" aria-hidden="true">
+                    <path class="card-edhrec-track" d="M 16 112 A 96 96 0 0 1 208 112"></path>
+                    <path data-gauge-fill d="M 16 112 A 96 96 0 0 1 208 112" pathLength="1" stroke-dasharray="0 1"></path>
+                  </svg>
+                  <output data-gauge-value aria-label="Ratio de classement">Indisponible</output>
+                </div>
+                <p id="card-edhrec-rank-position"></p>
+              </article>
+            </section>
             <section class="card-detail-rules" aria-labelledby="card-detail-rules-title">
               <h3 id="card-detail-rules-title">Texte de la carte</h3>
               <p id="card-detail-rules"></p>

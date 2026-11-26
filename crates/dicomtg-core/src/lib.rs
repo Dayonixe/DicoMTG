@@ -20,7 +20,9 @@ pub use card_image::{
     CARD_IMAGE_CACHE_CAPACITY_BYTES, CardImageCacheStats, CardImageError, CardImageFace,
     CardImageSize, card_image_cache_stats, clear_card_image_cache, load_card_image,
 };
-pub use card_localization::{CardLocalization, CardLocalizationError, load_card_localization};
+pub use card_localization::{
+    CardLocalization, CardLocalizationError, find_card_french_text, load_card_localization,
+};
 pub use collection::{
     CardFinish, CollectionBuildError, CollectionSnapshot, OwnedPrinting, UnresolvedCard,
     build_collection, rematch_collection,
@@ -46,7 +48,7 @@ pub use price_update::{
     PriceUpdateError, PriceUpdateSummary, install_cardmarket_data, install_cardmarket_price_guide,
     update_prices_from_cardmarket,
 };
-pub use storage::{CollectionStore, StorageError, StoredCollection};
+pub use storage::{CardEdhrecStats, CollectionStore, StorageError, StoredCollection};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PrintingKey {

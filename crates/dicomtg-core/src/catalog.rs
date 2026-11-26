@@ -52,6 +52,8 @@ pub struct CatalogCard {
     pub(crate) uuid: String,
     pub(crate) scryfall_id: Option<String>,
     pub(crate) cardmarket_id: Option<u64>,
+    pub(crate) edhrec_saltiness: Option<f64>,
+    pub(crate) edhrec_rank: Option<u32>,
     pub(crate) has_back_face: bool,
     pub(crate) name: String,
     pub(crate) key: PrintingKey,
@@ -374,6 +376,8 @@ struct HeaderIndices {
     uuid: usize,
     scryfall_id: Option<usize>,
     cardmarket_id: Option<usize>,
+    edhrec_saltiness: Option<usize>,
+    edhrec_rank: Option<usize>,
     side: Option<usize>,
     layout: Option<usize>,
 }
@@ -409,6 +413,10 @@ impl HeaderIndices {
             uuid: header_position(headers, "uuid")?,
             scryfall_id: headers.iter().position(|header| header == "scryfallId"),
             cardmarket_id: headers.iter().position(|header| header == "mcmId"),
+            edhrec_saltiness: headers
+                .iter()
+                .position(|header| header == "edhrecSaltiness"),
+            edhrec_rank: headers.iter().position(|header| header == "edhrecRank"),
             side: headers.iter().position(|header| header == "side"),
             layout: headers.iter().position(|header| header == "layout"),
         })
@@ -461,6 +469,15 @@ fn parse_record(
             .and_then(|index| optional_field(record, index))
             .map(|value| parse_cardmarket_id(&value, line))
             .transpose()?,
+        edhrec_saltiness: indices
+            .edhrec_saltiness
+            .and_then(|index| record.get(index))
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| (0.0..=4.0).contains(value)),
+        edhrec_rank: indices
+            .edhrec_rank
+            .and_then(|index| record.get(index))
+            .and_then(parse_edhrec_rank),
         has_back_face: indices
             .layout
             .and_then(|index| record.get(index))
@@ -481,6 +498,14 @@ fn parse_record(
         type_line: type_line.to_owned(),
         rules_text: optional_field(record, indices.text),
     })
+}
+
+fn parse_edhrec_rank(value: &str) -> Option<u32> {
+    let integer = value
+        .trim_end_matches('0')
+        .strip_suffix('.')
+        .unwrap_or(value);
+    integer.parse::<u32>().ok().filter(|rank| *rank > 0)
 }
 
 fn parse_cardmarket_id(value: &str, line: usize) -> Result<u64, CatalogImportError> {

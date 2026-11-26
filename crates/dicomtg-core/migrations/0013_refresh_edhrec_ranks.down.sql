@@ -1,0 +1,1 @@
+-- The next successful refresh records a new date.

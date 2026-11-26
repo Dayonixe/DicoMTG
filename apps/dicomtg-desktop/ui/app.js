@@ -99,6 +99,9 @@ const cardDetailEmpty = document.querySelector("#card-detail-empty");
 const cardDetailContent = document.querySelector("#card-detail-content");
 const cardDetailTitle = document.querySelector("#card-detail-title");
 const cardDetailFacts = document.querySelector("#card-detail-facts");
+const cardEdhrecSalt = document.querySelector("#card-edhrec-salt");
+const cardEdhrecRank = document.querySelector("#card-edhrec-rank");
+const cardEdhrecRankPosition = document.querySelector("#card-edhrec-rank-position");
 const cardDetailRules = document.querySelector("#card-detail-rules");
 const cardDetailPrintings = document.querySelector("#card-detail-printings");
 const mostExpensiveEmpty = document.querySelector("#most-expensive-empty");
@@ -205,6 +208,9 @@ const PREVIEW_FOCUS_DELAY_MS = 150;
 let cardPreviewTimer;
 let cardPreviewTarget;
 let cardDetailRequestId = 0;
+const alternateFrenchTextRequests = new Map();
+let cardEdhrecLookupId = 0;
+let refreshCardDetailEdhrecStats;
 let searchableCards = [];
 let collectionSnapshotCurrent = false;
 let dashboardRequest = 0;
@@ -230,7 +236,8 @@ const pageElements = new Map(
 );
 const navigationLinks = document.querySelectorAll("[data-nav-page]");
 
-const invoke = window.__TAURI__?.core?.invoke;
+const tauriCore = window.__TAURI__?.core;
+const invoke = tauriCore?.invoke;
 
 function showPage(page) {
   hideCardPreview();
@@ -688,10 +695,30 @@ function renderCardPrinting(item) {
   return { item, setName };
 }
 
+function loadAlternateFrenchText(oracleId) {
+  const cached = alternateFrenchTextRequests.get(oracleId);
+  if (cached) return cached;
+
+  if (alternateFrenchTextRequests.size >= 128) {
+    alternateFrenchTextRequests.delete(alternateFrenchTextRequests.keys().next().value);
+  }
+  const request = invoke("load_card_french_text", { oracleId }).catch(() => {
+    if (alternateFrenchTextRequests.get(oracleId) === request) {
+      alternateFrenchTextRequests.delete(oracleId);
+    }
+    return null;
+  });
+  alternateFrenchTextRequests.set(oracleId, request);
+  return request;
+}
+
 async function localizeCardDetail(printings, requestId) {
   if (!invoke) return;
+  let alternateLookup;
   let hasFrenchText = false;
+  let hasDisplayedRules = false;
   for (const { item, setName } of printings) {
+    if (requestId !== cardDetailRequestId) return;
     try {
       const localization = await invoke("load_card_localization", {
         setCode: item.setCode,
@@ -702,10 +729,64 @@ async function localizeCardDetail(printings, requestId) {
       if (!hasFrenchText && localization.frenchText) {
         setManaSymbolText(cardDetailRules, localization.frenchText);
         hasFrenchText = true;
+        hasDisplayedRules = true;
+      } else if (!hasDisplayedRules && localization.fallbackText) {
+        setManaSymbolText(cardDetailRules, localization.fallbackText);
+        hasDisplayedRules = true;
+      }
+      if (!hasFrenchText && !alternateLookup && localization.oracleId) {
+        alternateLookup = loadAlternateFrenchText(localization.oracleId).then((text) => {
+          if (text && !hasFrenchText && requestId === cardDetailRequestId) {
+            setManaSymbolText(cardDetailRules, text);
+            hasDisplayedRules = true;
+          }
+        });
       }
     } catch {
       // The local catalog remains a complete offline fallback.
     }
+  }
+  await alternateLookup;
+}
+
+function renderEdhrecGauge(gauge, fraction, text, invertColor = false) {
+  const progress = fraction ?? 0;
+  const hue = (invertColor ? 1 - progress : progress) * 120;
+  const fill = gauge.querySelector("[data-gauge-fill]");
+  fill.setAttribute("stroke", `hsl(${hue}, 76%, 54%)`);
+  fill.setAttribute("stroke-dasharray", `${progress} 1`);
+  gauge.toggleAttribute("data-empty", fraction == null);
+  gauge.querySelector("[data-gauge-value]").textContent = text;
+}
+
+function renderCardEdhrecStats(stats) {
+  const salt = stats?.saltScore;
+  const ratio = stats?.rankRatio;
+  renderEdhrecGauge(
+    cardEdhrecSalt,
+    salt == null ? null : salt / 4,
+    salt?.toLocaleString("fr-FR", { maximumFractionDigits: 2 }) ?? "Indisponible",
+    true,
+  );
+  renderEdhrecGauge(
+    cardEdhrecRank,
+    ratio,
+    ratio?.toLocaleString("fr-FR", { minimumFractionDigits: 3, maximumFractionDigits: 3 })
+      ?? "Indisponible",
+  );
+  cardEdhrecRankPosition.textContent = stats?.rank == null ? "" : `n° ${formatCount(stats.rank)}`;
+}
+
+async function loadCardEdhrecStats(uuid, requestId) {
+  if (!invoke || !uuid) return;
+  const lookupId = ++cardEdhrecLookupId;
+  try {
+    const stats = await invoke("load_card_edhrec_stats", { uuid });
+    if (requestId === cardDetailRequestId && lookupId === cardEdhrecLookupId) {
+      renderCardEdhrecStats(stats);
+    }
+  } catch {
+    // The card detail remains available if the local score lookup fails.
   }
 }
 
@@ -746,6 +827,9 @@ function showCardDetail(item) {
     ["Endurance", formatOptionalText(representative.toughness)],
   ];
   for (const [label, value] of facts) appendDetailFact(label, value);
+  renderCardEdhrecStats(null);
+  refreshCardDetailEdhrecStats = () => loadCardEdhrecStats(representative.uuid, requestId);
+  void refreshCardDetailEdhrecStats();
   setManaSymbolText(
     cardDetailRules,
     formatOptionalText(representative.rulesText),
@@ -2087,9 +2171,12 @@ async function refreshReferenceData(force) {
   statusRegion.textContent = "Actualisation des données de référence";
   try {
     if (!invoke) throw new Error("L’interface doit être ouverte depuis l’application DicoMTG.");
+    const catalogReady = new tauriCore.Channel();
+    catalogReady.onmessage = () => { void refreshCardDetailEdhrecStats?.(); };
     const summary = await invoke("update_reference_data", {
       localDate: todayLocalIso(),
       force,
+      catalogReady,
     });
     referenceResult.textContent = formatReferenceUpdate(summary);
     referenceResult.hidden = false;

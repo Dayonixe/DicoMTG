@@ -39,6 +39,8 @@ pub fn run() -> Result<(), tauri::Error> {
             commands::update_reference_data,
             commands::load_card_image_bytes,
             commands::load_card_localization,
+            commands::load_card_french_text,
+            commands::load_card_edhrec_stats,
             commands::load_image_cache_stats,
             commands::clear_image_cache,
             updater::app_update_status,

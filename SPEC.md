@@ -186,6 +186,10 @@ La liste affiche au minimum le nom, l’extension, le numéro, la quantité, la 
 
 Le détail d’une impression affiche ses informations de catalogue, sa quantité possédée, son prix de référence et la date de ce prix. Une donnée absente est présentée comme indisponible, jamais comme zéro implicite.
 
+La fiche affiche les données EDHREC du catalogue MTGJSON sous forme de deux jauges semi-circulaires. Le Salt Score sur 4 passe du vert au rouge à mesure qu’il augmente. Le Ratio de classement passe du rouge au vert. Il affiche le rang brut et le ratio `1 - (rang - 1) / (rang maximal - 1)`, calculé sur l’ensemble du catalogue. Si le rang maximal vaut 1, le ratio vaut 1. La fiche ouverte est actualisée dès la fin du chargement du catalogue et les jauges restent consultables hors ligne. Une valeur manquante est affichée comme indisponible, et zéro est affiché comme tel.
+
+La fiche privilégie le texte français imprimé, y compris celui d’une autre impression française de la même carte. Si aucun texte français n’est disponible, la fiche affiche le texte reçu, éventuellement en anglais.
+
 ### UI-005 — Navigation par vues
 
 L’interface sépare les usages du rapport Power BI en vues accessibles depuis une navigation persistante : vue d’ensemble, fiche carte, types, mots-clés, extensions, raretés et liste des cartes. Une vue Données regroupe l’actualisation du référentiel, l’import DragonShield et les diagnostics. L’URL locale conserve la vue active afin que les boutons précédent et suivant de la fenêtre fonctionnent.

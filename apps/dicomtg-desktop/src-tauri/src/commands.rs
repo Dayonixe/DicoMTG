@@ -13,13 +13,17 @@ use dicomtg_core::{
     CollectionQuery, CollectionSnapshot, CollectionStore, DistributionEntry, ImportError,
     MatchResult, RowIssueReason, analyze_collection, analyze_collection_by_type, build_collection,
     card_image_cache_stats, clear_card_image_cache,
-    download_collection_csv as fetch_collection_csv, google_drive_source_url,
-    import_collection_csv as parse_collection_csv, is_valid_iso_date, load_card_image,
-    load_card_localization as fetch_card_localization, most_expensive_card, query_collection,
-    rematch_collection, update_catalog_from_mtgjson, update_prices_from_cardmarket,
+    download_collection_csv as fetch_collection_csv, find_card_french_text,
+    google_drive_source_url, import_collection_csv as parse_collection_csv, is_valid_iso_date,
+    load_card_image, load_card_localization as fetch_card_localization, most_expensive_card,
+    query_collection, rematch_collection, update_catalog_from_mtgjson,
+    update_prices_from_cardmarket,
 };
 use serde::{Deserialize, Serialize};
-use tauri::{State, ipc::Response};
+use tauri::{
+    State,
+    ipc::{Channel, Response},
+};
 
 pub struct AppState {
     pub(crate) update_gate: crate::updater::UpdateGate,
@@ -231,6 +235,8 @@ pub struct ImageCacheDto {
 pub struct CardLocalizationDto {
     set_name: String,
     french_text: Option<String>,
+    fallback_text: Option<String>,
+    oracle_id: Option<String>,
 }
 
 pub(crate) fn build_dashboard(
@@ -710,6 +716,7 @@ pub async fn update_reference_data(
     state: State<'_, AppState>,
     local_date: String,
     force: bool,
+    catalog_ready: Channel<()>,
 ) -> Result<ReferenceUpdateDto, String> {
     if !valid_local_date(&local_date) {
         return Err("Date locale invalide".to_owned());
@@ -739,7 +746,9 @@ pub async fn update_reference_data(
             .map_err(|_| "local database lock is poisoned".to_owned())?
             .open_peer()
             .map_err(|error| error.to_string())?;
-        refresh_reference_data(&mut store, &update_directory, &local_date, force)
+        refresh_reference_data(&mut store, &update_directory, &local_date, force, || {
+            let _ = catalog_ready.send(());
+        })
     })
     .await
     .map_err(|error| format!("Échec de la tâche d’actualisation : {error}"))?
@@ -750,6 +759,7 @@ fn refresh_reference_data(
     update_directory: &PathBuf,
     local_date: &str,
     force: bool,
+    on_catalog_ready: impl FnOnce(),
 ) -> Result<ReferenceUpdateDto, String> {
     if !reference_update_due(
         store
@@ -772,6 +782,7 @@ fn refresh_reference_data(
 
     let catalog = update_catalog_from_mtgjson(store, update_directory)
         .map_err(|error| format!("Échec de l’actualisation du catalogue : {error}"))?;
+    on_catalog_ready();
     let prices = update_prices_from_cardmarket(store, update_directory)
         .map_err(|error| format!("Échec de l’actualisation des prix : {error}"))?;
     let candidates = store
@@ -864,6 +875,32 @@ pub fn load_card_image_bytes(
     Ok(Response::new(bytes))
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CardEdhrecStatsDto {
+    salt_score: Option<f64>,
+    rank: Option<u32>,
+    rank_ratio: Option<f64>,
+}
+
+#[tauri::command(async)]
+pub fn load_card_edhrec_stats(
+    state: State<'_, AppState>,
+    uuid: String,
+) -> Result<CardEdhrecStatsDto, String> {
+    let stats = state
+        .store
+        .lock()
+        .map_err(|_| "local database lock is poisoned".to_owned())?
+        .card_edhrec_stats(&uuid)
+        .map_err(|error| error.to_string())?;
+    Ok(CardEdhrecStatsDto {
+        salt_score: stats.salt_score,
+        rank: stats.rank,
+        rank_ratio: stats.rank_ratio,
+    })
+}
+
 #[tauri::command(async)]
 pub fn load_card_localization(
     state: State<'_, AppState>,
@@ -889,6 +926,8 @@ pub fn load_card_localization(
         .map(|localization| CardLocalizationDto {
             set_name: localization.set_name().to_owned(),
             french_text: localization.french_text().map(str::to_owned),
+            fallback_text: localization.fallback_text().map(str::to_owned),
+            oracle_id: localization.oracle_id().map(str::to_owned),
         })
         .map_err(|error| error.to_string())?;
     state
@@ -897,6 +936,11 @@ pub fn load_card_localization(
         .map_err(|_| "card localization cache lock is poisoned".to_owned())?
         .insert(key, localization.clone());
     Ok(localization)
+}
+
+#[tauri::command(async)]
+pub fn load_card_french_text(oracle_id: String) -> Result<Option<String>, String> {
+    find_card_french_text(&oracle_id).map_err(|error| error.to_string())
 }
 
 #[tauri::command(async)]

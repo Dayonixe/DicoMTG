@@ -1787,6 +1787,69 @@ tbody tr:last-child td {
   font-size: 0.9rem;
 }
 
+.card-edhrec-gauges {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+  max-width: 38rem;
+  margin: 1rem auto 0;
+}
+
+.card-edhrec-gauge {
+  min-width: 0;
+  padding: 0.8rem;
+  border: 1px solid #4c3d5c;
+  border-radius: 0.75rem;
+  background: #241d2d;
+  text-align: center;
+}
+
+.card-edhrec-gauge h3 {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+}
+
+.card-edhrec-dial {
+  position: relative;
+  width: min(100%, 13rem);
+  margin-inline: auto;
+}
+
+.card-edhrec-dial svg {
+  display: block;
+  width: 100%;
+  fill: none;
+  stroke-width: 30;
+}
+
+.card-edhrec-track {
+  stroke: #e9e6eb;
+}
+
+.card-edhrec-dial output {
+  position: absolute;
+  inset: auto 0 0.08em;
+  font-size: clamp(1.15rem, 3vw, 1.95rem);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.card-edhrec-gauge p {
+  min-height: 1.1em;
+  margin: 0.45rem 0 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.card-edhrec-gauge[data-empty] .card-edhrec-track {
+  stroke: #494052;
+}
+
+.card-edhrec-gauge[data-empty] output {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
 .card-detail-rules {
   margin-top: 1rem;
   padding: 1rem;
@@ -2069,6 +2132,10 @@ tbody tr:last-child td {
 
   .card-detail-grid {
     grid-template-columns: 1fr;
+  }
+
+  .card-edhrec-gauges {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 9rem), 1fr));
   }
 
   .card-detail-printings {

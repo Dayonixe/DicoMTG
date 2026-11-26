@@ -47,6 +47,18 @@ const MIGRATIONS: &[(i64, &str)] = &[
         10,
         include_str!("../migrations/0010_collection_drive_urls.up.sql"),
     ),
+    (
+        11,
+        include_str!("../migrations/0011_catalog_edhrec_saltiness.up.sql"),
+    ),
+    (
+        12,
+        include_str!("../migrations/0012_catalog_edhrec_rank.up.sql"),
+    ),
+    (
+        13,
+        include_str!("../migrations/0013_refresh_edhrec_ranks.up.sql"),
+    ),
 ];
 
 const SELECTED_PRINTING_UUIDS: &str = "SELECT items.uuid FROM collections
@@ -100,6 +112,13 @@ impl StoredCollection {
 pub struct CollectionStore {
     connection: Connection,
     writer: Arc<Mutex<()>>,
+}
+
+#[derive(Debug, Default, PartialEq)]
+pub struct CardEdhrecStats {
+    pub salt_score: Option<f64>,
+    pub rank: Option<u32>,
+    pub rank_ratio: Option<f64>,
 }
 
 impl CollectionStore {
@@ -508,9 +527,9 @@ impl CollectionStore {
                 "INSERT INTO catalog_cards
                  (position, uuid, name, set_code, collector_number, rarity, mana_value,
                   language, mana_cost, power, toughness, type_line, rules_text, scryfall_id,
-                  has_back_face, cardmarket_id)
+                  has_back_face, cardmarket_id, edhrec_saltiness, edhrec_rank)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                         ?15, ?16)",
+                         ?15, ?16, ?17, ?18)",
             )?;
             let mut facet_statement = transaction.prepare(
                 "INSERT INTO catalog_facets (card_uuid, kind, position, value)
@@ -535,6 +554,8 @@ impl CollectionStore {
                     card.scryfall_id,
                     card.has_back_face,
                     card.cardmarket_id,
+                    card.edhrec_saltiness,
+                    card.edhrec_rank,
                 ])?;
                 insert_facets(&mut facet_statement, &card.uuid, "color", &card.colors)?;
                 insert_facets(
@@ -566,7 +587,7 @@ impl CollectionStore {
         let mut statement = self.connection.prepare(&format!(
             "SELECT uuid, name, set_code, collector_number, rarity, mana_value, language,
                     mana_cost, power, toughness, type_line, rules_text, scryfall_id,
-                    has_back_face, cardmarket_id
+                    has_back_face, cardmarket_id, edhrec_saltiness, edhrec_rank
              FROM catalog_cards {scope} ORDER BY position",
         ))?;
         let mut rows = statement.query([])?;
@@ -580,6 +601,8 @@ impl CollectionStore {
                 scryfall_id: row.get(12)?,
                 has_back_face: row.get(13)?,
                 cardmarket_id: row.get(14)?,
+                edhrec_saltiness: row.get(15)?,
+                edhrec_rank: row.get(16)?,
                 name: row.get(1)?,
                 key: PrintingKey::new(&row.get::<_, String>(2)?, &row.get::<_, String>(3)?),
                 rarity: row.get(4)?,
@@ -603,6 +626,50 @@ impl CollectionStore {
             ));
         }
         Ok(cards)
+    }
+
+    pub fn card_edhrec_stats(&self, uuid: &str) -> Result<CardEdhrecStats, StorageError> {
+        let stats = self
+            .connection
+            .query_row(
+                "SELECT COALESCE(card.edhrec_saltiness, (
+                    SELECT printing.edhrec_saltiness
+                    FROM catalog_cards AS printing
+                    WHERE printing.name = card.name COLLATE NOCASE
+                      AND printing.edhrec_saltiness IS NOT NULL
+                    ORDER BY printing.position
+                    LIMIT 1
+                )), COALESCE(card.edhrec_rank, (
+                    SELECT printing.edhrec_rank
+                    FROM catalog_cards AS printing
+                    WHERE printing.name = card.name COLLATE NOCASE
+                      AND printing.edhrec_rank IS NOT NULL
+                    ORDER BY printing.position
+                    LIMIT 1
+                )), (SELECT MAX(edhrec_rank) FROM catalog_cards WHERE edhrec_rank IS NOT NULL)
+                FROM catalog_cards AS card
+                WHERE card.uuid = ?1 AND card.rarity <> 'token'",
+                [uuid],
+                |row| {
+                    let salt_score = row.get(0)?;
+                    let rank = row.get::<_, Option<u32>>(1)?;
+                    let max_rank = row.get::<_, Option<u32>>(2)?;
+                    let rank_ratio = rank.zip(max_rank).map(|(rank, max_rank)| {
+                        if max_rank == 1 {
+                            1.0
+                        } else {
+                            1.0 - (f64::from(rank) - 1.0) / (f64::from(max_rank) - 1.0)
+                        }
+                    });
+                    Ok(CardEdhrecStats {
+                        salt_score,
+                        rank,
+                        rank_ratio,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(stats.unwrap_or_default())
     }
 
     pub fn replace_prices(&mut self, prices: &PriceImport) -> Result<(), StorageError> {

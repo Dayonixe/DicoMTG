@@ -1,16 +1,26 @@
-use std::{error::Error, fmt, io::Read, time::Duration};
+use std::{error::Error, fmt, io::Read, sync::LazyLock, time::Duration};
 
 use serde::Deserialize;
 use ureq::Agent;
 
-use crate::card_image::encode_path_segment;
+use crate::card_image::{encode_path_segment, is_scryfall_id};
 
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+static SCRYFALL_AGENT: LazyLock<Agent> = LazyLock::new(|| {
+    Agent::new_with_config(
+        Agent::config_builder()
+            .https_only(true)
+            .timeout_global(Some(Duration::from_secs(15)))
+            .build(),
+    )
+});
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CardLocalization {
     set_name: String,
     french_text: Option<String>,
+    fallback_text: Option<String>,
+    oracle_id: Option<String>,
 }
 
 impl CardLocalization {
@@ -22,6 +32,16 @@ impl CardLocalization {
     #[must_use]
     pub fn french_text(&self) -> Option<&str> {
         self.french_text.as_deref()
+    }
+
+    #[must_use]
+    pub fn fallback_text(&self) -> Option<&str> {
+        self.fallback_text.as_deref()
+    }
+
+    #[must_use]
+    pub fn oracle_id(&self) -> Option<&str> {
+        self.oracle_id.as_deref()
     }
 }
 
@@ -71,6 +91,9 @@ impl From<serde_json::Error> for CardLocalizationError {
 #[derive(Debug, Deserialize)]
 struct ScryfallCard {
     set_name: String,
+    oracle_id: Option<String>,
+    lang: Option<String>,
+    oracle_text: Option<String>,
     printed_text: Option<String>,
     card_faces: Option<Vec<ScryfallFace>>,
 }
@@ -78,47 +101,59 @@ struct ScryfallCard {
 #[derive(Debug, Deserialize)]
 struct ScryfallFace {
     printed_name: Option<String>,
+    oracle_text: Option<String>,
     printed_text: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct ScryfallCardList {
+    data: Vec<ScryfallCard>,
+}
+
 impl ScryfallCard {
-    fn french_text(&self) -> Option<String> {
-        self.printed_text
-            .as_deref()
-            .filter(|text| !text.trim().is_empty())
-            .map(str::to_owned)
-            .or_else(|| {
-                let faces = self
-                    .card_faces
-                    .as_ref()?
-                    .iter()
-                    .filter_map(|face| {
-                        let text = face.printed_text.as_deref()?.trim();
-                        if text.is_empty() {
-                            return None;
-                        }
-                        Some(match face.printed_name.as_deref().map(str::trim) {
-                            Some(name) if !name.is_empty() => format!("{name}\n{text}"),
-                            _ => text.to_owned(),
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                (!faces.is_empty()).then(|| faces.join("\n\n"))
-            })
+    fn printed_rules(&self, require_french: bool) -> Option<String> {
+        let oracle_text = self.oracle_text.as_deref().filter(|_| require_french);
+        if let Some(text) = usable_printed_text(self.printed_text.as_deref(), oracle_text) {
+            return Some(text.to_owned());
+        }
+
+        let mut faces = Vec::new();
+        for face in self.card_faces.as_ref()? {
+            let oracle_text = face.oracle_text.as_deref().filter(|_| require_french);
+            if let Some(text) = usable_printed_text(face.printed_text.as_deref(), oracle_text) {
+                faces.push(match face.printed_name.as_deref().map(str::trim) {
+                    Some(name) if !name.is_empty() => format!("{name}\n{text}"),
+                    _ => text.to_owned(),
+                });
+            } else if face
+                .oracle_text
+                .as_deref()
+                .is_some_and(|text| !text.trim().is_empty())
+            {
+                return None;
+            }
+        }
+        (!faces.is_empty()).then(|| faces.join("\n\n"))
     }
+}
+
+fn usable_printed_text<'a>(printed: Option<&'a str>, oracle: Option<&str>) -> Option<&'a str> {
+    let text = printed?.trim();
+    if text.is_empty()
+        || oracle.is_some_and(|oracle| oracle.split_whitespace().eq(text.split_whitespace()))
+    {
+        return None;
+    }
+    Some(text)
 }
 
 pub fn load_card_localization(
     set_code: &str,
     collector_number: &str,
 ) -> Result<CardLocalization, CardLocalizationError> {
-    let agent = Agent::new_with_config(
-        Agent::config_builder()
-            .https_only(true)
-            .timeout_global(Some(Duration::from_secs(15)))
-            .build(),
-    );
-    load_card_localization_with(set_code, collector_number, |url| download_json(&agent, url))
+    load_card_localization_with(set_code, collector_number, |url| {
+        download_json(&SCRYFALL_AGENT, url)
+    })
 }
 
 fn load_card_localization_with(
@@ -144,21 +179,56 @@ fn load_card_localization_with(
             encode_path_segment(collector_number),
         )
     };
-    if let Some(bytes) = download(&card_url("fr"))? {
+    let (card, is_french) = if let Some(bytes) = download(&card_url("fr"))? {
         let card: ScryfallCard = serde_json::from_slice(&bytes)?;
-        let french_text = card.french_text();
-        return Ok(CardLocalization {
-            set_name: card.set_name,
-            french_text,
-        });
-    }
-
-    let bytes = download(&card_url("en"))?.ok_or(CardLocalizationError::Unavailable)?;
-    let card: ScryfallCard = serde_json::from_slice(&bytes)?;
+        let is_french = card.lang.as_deref() == Some("fr");
+        (card, is_french)
+    } else {
+        let bytes = download(&card_url("en"))?.ok_or(CardLocalizationError::Unavailable)?;
+        (serde_json::from_slice(&bytes)?, false)
+    };
+    let french_text = is_french.then(|| card.printed_rules(true)).flatten();
+    let fallback_text = if is_french && french_text.is_none() {
+        card.printed_rules(false)
+    } else {
+        None
+    };
     Ok(CardLocalization {
         set_name: card.set_name,
-        french_text: None,
+        french_text,
+        fallback_text,
+        oracle_id: card.oracle_id,
     })
+}
+
+pub fn find_card_french_text(oracle_id: &str) -> Result<Option<String>, CardLocalizationError> {
+    find_card_french_text_with(oracle_id, |url| download_json(&SCRYFALL_AGENT, url))
+}
+
+fn find_card_french_text_with(
+    oracle_id: &str,
+    download: impl FnOnce(&str) -> Result<Option<Vec<u8>>, CardLocalizationError>,
+) -> Result<Option<String>, CardLocalizationError> {
+    if !is_scryfall_id(oracle_id) {
+        return Err(CardLocalizationError::InvalidRequest(
+            "invalid Oracle identifier",
+        ));
+    }
+
+    let query = encode_path_segment(&format!("oracleid:{oracle_id} lang:fr"));
+    let url = format!("https://api.scryfall.com/cards/search?q={query}&unique=prints");
+    let Some(bytes) = download(&url)? else {
+        return Ok(None);
+    };
+    let printings: ScryfallCardList = serde_json::from_slice(&bytes)?;
+    Ok(printings
+        .data
+        .into_iter()
+        .filter(|printing| {
+            printing.lang.as_deref() == Some("fr")
+                && printing.oracle_id.as_deref() == Some(oracle_id)
+        })
+        .find_map(|printing| printing.printed_rules(true)))
 }
 
 fn download_json(agent: &Agent, url: &str) -> Result<Option<Vec<u8>>, CardLocalizationError> {
@@ -188,14 +258,14 @@ fn download_json(agent: &Agent, url: &str) -> Result<Option<Vec<u8>>, CardLocali
 mod tests {
     use std::cell::Cell;
 
-    use super::{CardLocalizationError, load_card_localization_with};
+    use super::{CardLocalizationError, find_card_french_text_with, load_card_localization_with};
 
     #[test]
     fn ui_012_returns_official_french_text_and_set_name() {
         let localization = load_card_localization_with("c21", "263", |url| {
             assert!(url.ends_with("/c21/263/fr"));
             Ok(Some(
-                br#"{"set_name":"Commander 2021","printed_text":"Ajoutez deux manas.","card_faces":null}"#
+                br#"{"set_name":"Commander 2021","lang":"fr","printed_text":"Ajoutez deux manas.","card_faces":null}"#
                     .to_vec(),
             ))
         })
@@ -203,6 +273,44 @@ mod tests {
 
         assert_eq!(localization.set_name(), "Commander 2021");
         assert_eq!(localization.french_text(), Some("Ajoutez deux manas."));
+    }
+
+    #[test]
+    fn ui_012_uses_french_text_from_another_printing_of_the_same_card() {
+        let oracle_id = "00000000-0000-4000-8000-000000000001";
+        let french_text = find_card_french_text_with(oracle_id, |url| {
+            assert!(url.contains(&format!("q=oracleid%3A{oracle_id}%20lang%3Afr")));
+            Ok(Some(
+                br#"{"data":[
+                    {"set_name":"Other Set","oracle_id":"another-card","lang":"fr","printed_text":"Ignorez ce texte."},
+                    {"set_name":"Other Set","oracle_id":"00000000-0000-4000-8000-000000000001","lang":"en","printed_text":"Draw one card."},
+                    {"set_name":"Other Set","oracle_id":"00000000-0000-4000-8000-000000000001","lang":"fr","printed_text":"Piochez une carte."}
+                ]}"#
+                    .to_vec(),
+            ))
+        })
+        .unwrap();
+
+        assert_eq!(french_text.as_deref(), Some("Piochez une carte."));
+    }
+
+    #[test]
+    fn ui_012_keeps_the_received_text_when_localized_metadata_repeats_english_rules() {
+        let localization = load_card_localization_with("eoe", "128", |url| {
+            assert!(url.ends_with("/eoe/128/fr"));
+            Ok(Some(
+                    br#"{"set_name":"Edge of Eternities","oracle_id":"same-card","lang":"fr","oracle_text":"Destroy all creatures.","printed_text":" Destroy all\ncreatures. "}"#
+                        .to_vec(),
+                ))
+        })
+        .unwrap();
+
+        assert_eq!(localization.french_text(), None);
+        assert_eq!(localization.oracle_id(), Some("same-card"));
+        assert_eq!(
+            localization.fallback_text(),
+            Some("Destroy all\ncreatures.")
+        );
     }
 
     #[test]
@@ -233,6 +341,11 @@ mod tests {
         })
         .unwrap_err();
 
+        assert!(matches!(error, CardLocalizationError::InvalidRequest(_)));
+        let error = find_card_french_text_with("not-an-oracle-id", |_| {
+            panic!("invalid input must not reach the network")
+        })
+        .unwrap_err();
         assert!(matches!(error, CardLocalizationError::InvalidRequest(_)));
     }
 }
