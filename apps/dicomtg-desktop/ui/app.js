@@ -31,6 +31,7 @@ import {
   cardNameSuggestions,
   findCardsByName,
   groupCardPrintings,
+  groupCardVariants,
 } from "./card-search.js";
 import { PAGE_IDS, pageFromHash } from "./navigation.js";
 import { cardsTableCsv } from "./csv-export.js";
@@ -97,13 +98,8 @@ const errorRegion = document.querySelector("#load-error");
 const rows = document.querySelector("#collection-rows");
 const cardDetailEmpty = document.querySelector("#card-detail-empty");
 const cardDetailContent = document.querySelector("#card-detail-content");
+const cardDetailTemplate = document.querySelector("#card-detail-template");
 const cardDetailTitle = document.querySelector("#card-detail-title");
-const cardDetailFacts = document.querySelector("#card-detail-facts");
-const cardEdhrecSalt = document.querySelector("#card-edhrec-salt");
-const cardEdhrecRank = document.querySelector("#card-edhrec-rank");
-const cardEdhrecRankPosition = document.querySelector("#card-edhrec-rank-position");
-const cardDetailRules = document.querySelector("#card-detail-rules");
-const cardDetailPrintings = document.querySelector("#card-detail-printings");
 const mostExpensiveEmpty = document.querySelector("#most-expensive-empty");
 const mostExpensiveCard = document.querySelector("#most-expensive-card");
 const mostExpensiveImage = document.querySelector("#most-expensive-image");
@@ -203,13 +199,25 @@ const deckColorNames = {
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 const cardImageRequestIds = new WeakMap();
 const cardImageObjectUrls = new WeakMap();
+const relatedTokenImages = new WeakMap();
+const relatedTokenObserver = new IntersectionObserver((entries, observer) => {
+  for (const { target, isIntersecting } of entries) {
+    if (!isIntersecting) continue;
+    observer.unobserve(target);
+    const preview = relatedTokenImages.get(target);
+    relatedTokenImages.delete(target);
+    if (preview && target.isConnected) {
+      void showCardImage(preview.token, preview.image, preview.imageState, "small");
+    }
+  }
+}, { rootMargin: "100px" });
 const PREVIEW_HOVER_DELAY_MS = 350;
 const PREVIEW_FOCUS_DELAY_MS = 150;
 let cardPreviewTimer;
 let cardPreviewTarget;
 let cardDetailRequestId = 0;
 const alternateFrenchTextRequests = new Map();
-let cardEdhrecLookupId = 0;
+const englishRelatedTokenRequests = new Map();
 let refreshCardDetailEdhrecStats;
 let searchableCards = [];
 let collectionSnapshotCurrent = false;
@@ -223,6 +231,7 @@ const typeChartFilters = { colors: [], manaValues: [] };
 const tableSortStates = new WeakMap();
 const analysisContexts = new WeakMap();
 let collectionItems = [];
+let setReleaseDates = {};
 let collectionRowsDirty = false;
 let collectionFrame;
 const virtualTables = new WeakMap();
@@ -457,7 +466,7 @@ function appendCell(row, value, className) {
   row.append(cell);
 }
 
-function appendDetailFact(label, value) {
+function appendDetailFact(facts, label, value) {
   const fact = document.createElement("div");
   const term = document.createElement("dt");
   const description = document.createElement("dd");
@@ -465,7 +474,7 @@ function appendDetailFact(label, value) {
   if (value instanceof Node) description.append(value);
   else description.textContent = value;
   fact.append(term, description);
-  cardDetailFacts.append(fact);
+  facts.append(fact);
 }
 
 function createManaSymbolText(value, fallback = "Indisponible") {
@@ -533,8 +542,8 @@ async function showCardImage(item, image, state, size = "normal", face = "front"
     try {
       const bytes = await invoke("load_card_image_bytes", {
         scryfallId: item.scryfallId ?? null,
-        setCode: item.setCode,
-        collectorNumber: item.collectorNumber,
+        setCode: item.setCode ?? "",
+        collectorNumber: item.collectorNumber ?? "",
         size,
         face,
       });
@@ -620,18 +629,15 @@ function attachCardPreview(target, item) {
   target.addEventListener("blur", hideCardPreview);
 }
 
-function clearCardDetailPrintings() {
-  for (const image of cardDetailPrintings.querySelectorAll("img")) {
+function clearCardDetail() {
+  relatedTokenObserver.disconnect();
+  for (const image of cardDetailContent.querySelectorAll(".card-image-frame > img")) {
     clearCardImage(image, image.parentElement.querySelector("p"));
   }
-  cardDetailPrintings.replaceChildren();
+  cardDetailContent.replaceChildren();
 }
 
-function renderCardPrinting(item) {
-  const printing = document.createElement("article");
-  printing.className = "card-printing";
-  const visual = document.createElement("figure");
-  visual.className = "card-printing-visual";
+function createCardImageFrame() {
   const frame = document.createElement("div");
   frame.className = "card-image-frame";
   const image = document.createElement("img");
@@ -643,6 +649,15 @@ function renderCardPrinting(item) {
   imageState.setAttribute("aria-live", "polite");
   imageState.textContent = "Illustration en attente.";
   frame.append(image, imageState);
+  return { frame, image, imageState };
+}
+
+function renderCardPrinting(item, gallery) {
+  const printing = document.createElement("article");
+  printing.className = "card-printing";
+  const visual = document.createElement("figure");
+  visual.className = "card-printing-visual";
+  const { frame, image, imageState } = createCardImageFrame();
 
   if (item.hasBackFace) {
     let face = "front";
@@ -690,9 +705,49 @@ function renderCardPrinting(item) {
   }
 
   printing.append(visual, prices);
-  cardDetailPrintings.append(printing);
+  gallery.append(printing);
   showCardImage(item, image, imageState);
   return { item, setName };
+}
+
+function appendRelatedTokens(section, tokens, seenIds) {
+  const gallery = section.querySelector(".related-token-gallery");
+  for (const token of tokens) {
+    if (seenIds.has(token.scryfallId)) continue;
+    seenIds.add(token.scryfallId);
+
+    const visual = document.createElement("figure");
+    visual.className = "card-printing-visual";
+    const { frame, image, imageState } = createCardImageFrame();
+    const caption = document.createElement("figcaption");
+    const name = document.createElement("strong");
+    name.className = "card-printing-set";
+    name.textContent = token.name;
+    const type = document.createElement("span");
+    type.className = "card-printing-number";
+    type.textContent = token.typeLine;
+    caption.append(name, type);
+    visual.append(frame, caption);
+    gallery.append(visual);
+    relatedTokenImages.set(frame, { token, image, imageState });
+    relatedTokenObserver.observe(frame);
+  }
+  section.hidden = false;
+}
+
+function renderCardLegalities(target, legalities) {
+  const labels = {
+    legal: "Légale",
+    not_legal: "Non légale",
+    banned: "Bannie",
+    restricted: "Restreinte",
+    suspended: "Suspendue",
+  };
+  for (const element of target.querySelectorAll("[data-format]")) {
+    const status = legalities?.[element.dataset.format];
+    element.textContent = labels[status] ?? "Indisponible";
+    element.dataset.status = status ?? "";
+  }
 }
 
 function loadAlternateFrenchText(oracleId) {
@@ -712,11 +767,33 @@ function loadAlternateFrenchText(oracleId) {
   return request;
 }
 
-async function localizeCardDetail(printings, requestId) {
+function loadEnglishRelatedTokens({ setCode, collectorNumber, oracleId }) {
+  const key = `${setCode}\0${collectorNumber}\0${oracleId}`;
+  const cached = englishRelatedTokenRequests.get(key);
+  if (cached) return cached;
+
+  if (englishRelatedTokenRequests.size >= 128) {
+    englishRelatedTokenRequests.delete(englishRelatedTokenRequests.keys().next().value);
+  }
+  const request = invoke("load_card_related_tokens", { setCode, collectorNumber, oracleId })
+    .catch(() => {
+      if (englishRelatedTokenRequests.get(key) === request) {
+        englishRelatedTokenRequests.delete(key);
+      }
+      return [];
+    });
+  englishRelatedTokenRequests.set(key, request);
+  return request;
+}
+
+async function localizeCardDetail({ printings, rules, legalities, relatedTokens }, requestId) {
   if (!invoke) return;
   let alternateLookup;
   let hasFrenchText = false;
   let hasDisplayedRules = false;
+  let hasLegalities = false;
+  let englishTokenCandidate;
+  const seenTokenIds = new Set();
   for (const { item, setName } of printings) {
     if (requestId !== cardDetailRequestId) return;
     try {
@@ -726,18 +803,31 @@ async function localizeCardDetail(printings, requestId) {
       });
       if (requestId !== cardDetailRequestId) return;
       setName.textContent = localization.setName;
+      if (localization.relatedTokens?.length) {
+        appendRelatedTokens(relatedTokens, localization.relatedTokens, seenTokenIds);
+      } else if (!englishTokenCandidate && localization.needsEnglishTokenLookup) {
+        englishTokenCandidate = {
+          setCode: item.setCode,
+          collectorNumber: item.collectorNumber,
+          oracleId: localization.oracleId,
+        };
+      }
+      if (!hasLegalities && localization.legalities) {
+        renderCardLegalities(legalities, localization.legalities);
+        hasLegalities = true;
+      }
       if (!hasFrenchText && localization.frenchText) {
-        setManaSymbolText(cardDetailRules, localization.frenchText);
+        setManaSymbolText(rules, localization.frenchText);
         hasFrenchText = true;
         hasDisplayedRules = true;
       } else if (!hasDisplayedRules && localization.fallbackText) {
-        setManaSymbolText(cardDetailRules, localization.fallbackText);
+        setManaSymbolText(rules, localization.fallbackText);
         hasDisplayedRules = true;
       }
       if (!hasFrenchText && !alternateLookup && localization.oracleId) {
         alternateLookup = loadAlternateFrenchText(localization.oracleId).then((text) => {
           if (text && !hasFrenchText && requestId === cardDetailRequestId) {
-            setManaSymbolText(cardDetailRules, text);
+            setManaSymbolText(rules, text);
             hasDisplayedRules = true;
           }
         });
@@ -746,7 +836,22 @@ async function localizeCardDetail(printings, requestId) {
       // The local catalog remains a complete offline fallback.
     }
   }
-  await alternateLookup;
+  let tokenLookup;
+  if (englishTokenCandidate && seenTokenIds.size === 0 && requestId === cardDetailRequestId) {
+    tokenLookup = loadEnglishRelatedTokens(englishTokenCandidate).then((tokens) => {
+      if (requestId === cardDetailRequestId && tokens.length) {
+        appendRelatedTokens(relatedTokens, tokens, seenTokenIds);
+      }
+    });
+  }
+  await Promise.all([alternateLookup, tokenLookup]);
+}
+
+async function localizeCardVariants(details, requestId) {
+  for (const detail of details) {
+    if (requestId !== cardDetailRequestId) return;
+    await localizeCardDetail(detail, requestId);
+  }
 }
 
 function renderEdhrecGauge(gauge, fraction, text, invertColor = false) {
@@ -759,48 +864,56 @@ function renderEdhrecGauge(gauge, fraction, text, invertColor = false) {
   gauge.querySelector("[data-gauge-value]").textContent = text;
 }
 
-function renderCardEdhrecStats(stats) {
+function renderCardEdhrecStats(stats, block) {
   const salt = stats?.saltScore;
   const ratio = stats?.rankRatio;
   renderEdhrecGauge(
-    cardEdhrecSalt,
+    block.querySelector("[data-salt-gauge]"),
     salt == null ? null : salt / 4,
     salt?.toLocaleString("fr-FR", { maximumFractionDigits: 2 }) ?? "Indisponible",
     true,
   );
   renderEdhrecGauge(
-    cardEdhrecRank,
+    block.querySelector("[data-rank-gauge]"),
     ratio,
     ratio?.toLocaleString("fr-FR", { minimumFractionDigits: 3, maximumFractionDigits: 3 })
       ?? "Indisponible",
   );
-  cardEdhrecRankPosition.textContent = stats?.rank == null ? "" : `n° ${formatCount(stats.rank)}`;
+  block.querySelector("[data-rank-position]").textContent =
+    stats?.rank == null ? "" : `n° ${formatCount(stats.rank)}`;
 }
 
-async function loadCardEdhrecStats(uuid, requestId) {
+async function loadCardEdhrecStats(detail, requestId) {
+  const { uuid, block } = detail;
   if (!invoke || !uuid) return;
-  const lookupId = ++cardEdhrecLookupId;
+  const lookupId = ++detail.edhrecLookupId;
   try {
     const stats = await invoke("load_card_edhrec_stats", { uuid });
-    if (requestId === cardDetailRequestId && lookupId === cardEdhrecLookupId) {
-      renderCardEdhrecStats(stats);
+    if (requestId === cardDetailRequestId && lookupId === detail.edhrecLookupId) {
+      renderCardEdhrecStats(stats, block);
     }
   } catch {
     // The card detail remains available if the local score lookup fails.
   }
 }
 
-function showCardDetail(item) {
-  hideCardPreview();
-  const matchingCards = findCardsByName(searchableCards, item.name);
-  const cards = matchingCards.length > 0 ? matchingCards : [item];
+function renderCardDetailVariant({ kind, cards }, showHeading) {
+  const block = document.importNode(cardDetailTemplate.content.firstElementChild, true);
   const representative = cards.find((card) => card.uuid) ?? cards[0];
-  const requestId = ++cardDetailRequestId;
-  cardDetailSearch.value = representative.name;
-  cardDetailSearchError.hidden = true;
-  cardDetailTitle.textContent = representative.name;
-  cardDetailFacts.replaceChildren();
-  clearCardDetailPrintings();
+  if (showHeading) {
+    let title = kind === "unresolved" ? "Impressions à identifier" : "Carte";
+    if (kind === "token") {
+      const stats = representative.power != null && representative.toughness != null
+        ? ` ${representative.power}/${representative.toughness}`
+        : "";
+      title = [`Jeton${stats}`, ...(representative.keywords ?? [])].join(" · ");
+    }
+    const heading = block.querySelector(".card-variant-title");
+    heading.textContent = title;
+    heading.hidden = false;
+    block.setAttribute("aria-label", title);
+  }
+  if (kind !== "card") block.querySelector(".card-edhrec-gauges").remove();
 
   const mergedValues = (key) => [
     ...new Set(cards.flatMap((card) => card[key] ?? []).filter(Boolean)),
@@ -826,17 +939,41 @@ function showCardDetail(item) {
     ["Force", formatOptionalText(representative.power)],
     ["Endurance", formatOptionalText(representative.toughness)],
   ];
-  for (const [label, value] of facts) appendDetailFact(label, value);
-  renderCardEdhrecStats(null);
-  refreshCardDetailEdhrecStats = () => loadCardEdhrecStats(representative.uuid, requestId);
-  void refreshCardDetailEdhrecStats();
-  setManaSymbolText(
-    cardDetailRules,
-    formatOptionalText(representative.rulesText),
-  );
+  const factsList = block.querySelector(".card-detail-grid");
+  for (const [label, value] of facts) appendDetailFact(factsList, label, value);
+  const rules = block.querySelector(".card-detail-rules p");
+  setManaSymbolText(rules, formatOptionalText(representative.rulesText));
+  const gallery = block.querySelector(".card-detail-printings");
+  return {
+    block,
+    rules,
+    legalities: block.querySelector(".card-legality-list"),
+    relatedTokens: block.querySelector("[data-related-tokens]"),
+    printings: groupCardPrintings(cards).map((printing) => renderCardPrinting(printing, gallery)),
+    uuid: kind === "card" ? representative.uuid : null,
+    edhrecLookupId: 0,
+  };
+}
 
-  const printings = groupCardPrintings(cards).map(renderCardPrinting);
-  void localizeCardDetail(printings, requestId);
+function showCardDetail(item) {
+  hideCardPreview();
+  const matchingCards = findCardsByName(searchableCards, item.name);
+  const cards = matchingCards.length > 0 ? matchingCards : [item];
+  const representative = cards.find((card) => card.uuid) ?? cards[0];
+  const requestId = ++cardDetailRequestId;
+  cardDetailSearch.value = representative.name;
+  cardDetailSearchError.hidden = true;
+  cardDetailTitle.textContent = representative.name;
+  clearCardDetail();
+
+  const variants = groupCardVariants(cards);
+  const details = variants.map((variant) => renderCardDetailVariant(variant, variants.length > 1));
+  cardDetailContent.append(...details.map(({ block }) => block));
+  refreshCardDetailEdhrecStats = () => {
+    for (const detail of details) void loadCardEdhrecStats(detail, requestId);
+  };
+  refreshCardDetailEdhrecStats();
+  void localizeCardVariants(details, requestId);
   cardDetailEmpty.hidden = true;
   cardDetailContent.hidden = false;
   navigateToPage("card");
@@ -946,7 +1083,7 @@ function renderItems(items) {
   collectionRowsDirty = false;
   renderVirtualTable(
     rows,
-    sortCards(items, sortStateFor(rows)),
+    sortCards(items, sortStateFor(rows), setReleaseDates),
     createCollectionRow,
     "Aucune carte ne correspond aux filtres actuels.",
   );
@@ -1599,7 +1736,7 @@ function renderAnalysisItems(items, rowsTarget, summaryTarget, emptyMessage) {
 }
 
 function renderSortedAnalysisRows(target, { groupedItems, emptyMessage }) {
-  const items = sortCards(groupedItems, sortStateFor(target));
+  const items = sortCards(groupedItems, sortStateFor(target), setReleaseDates);
   renderVirtualTable(target, items, createAnalysisRow, emptyMessage);
 }
 
@@ -1978,6 +2115,7 @@ async function loadDashboard(refreshSearchIndex = false) {
     const query = currentQuery();
     const dashboard = await invoke("load_dashboard", { query });
     if (request !== dashboardRequest) return false;
+    setReleaseDates = dashboard.setReleaseDates ?? {};
     if (!hasActiveQuery(query)) {
       updateSearchableCards(dashboard.items);
     } else if (!collectionSnapshotCurrent) {
@@ -2183,6 +2321,7 @@ async function refreshReferenceData(force) {
     if (summary.status === "updated" && (await loadDashboard(true))) {
       statusRegion.textContent = "Données de référence actualisées";
     } else if (summary.status === "current") {
+      if (summary.setDatesInitialized) await loadDashboard();
       statusRegion.textContent = "Données de référence à jour";
     }
   } catch (error) {

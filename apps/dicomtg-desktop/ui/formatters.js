@@ -47,17 +47,17 @@ const distributionLabels = {
 };
 
 export function cardImageUrl(item, size = "normal", face = "front") {
-  if (!item?.uuid || !item.setCode?.trim() || !item.collectorNumber?.trim()) {
-    return null;
-  }
   const imageSize = size === "small" ? "small" : "normal";
   const imageFace = face === "back" ? "back" : "front";
 
-  const scryfallId = item.scryfallId?.trim().toLowerCase();
+  const scryfallId = item?.scryfallId?.trim().toLowerCase();
   if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(scryfallId)) {
     return `https://cards.scryfall.io/${imageSize}/${imageFace}/${scryfallId[0]}/${scryfallId[1]}/${scryfallId}.jpg`;
   }
 
+  if (!item?.uuid || !item.setCode?.trim() || !item.collectorNumber?.trim()) {
+    return null;
+  }
   const setCode = encodeURIComponent(item.setCode.trim().toLowerCase());
   const collectorNumber = encodeURIComponent(item.collectorNumber.trim());
   return `https://api.scryfall.com/cards/${setCode}/${collectorNumber}?format=image&version=${imageSize}&face=${imageFace}`;

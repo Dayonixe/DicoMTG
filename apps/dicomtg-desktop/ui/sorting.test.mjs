@@ -50,3 +50,29 @@ test("starts a new column ascending then toggles its direction", () => {
     direction: "descending",
   });
 });
+
+test("sorts the four Magic rarities in game order and keeps other rarities at the end", () => {
+  const items = ["rare", "token", "common", "mythic", null, "uncommon"].map((rarity, index) => ({
+    name: String(index), rarity,
+  }));
+  assert.deepEqual(sortCards(items, { key: "rarity", direction: "ascending" }).map((item) => item.rarity), [
+    "common", "uncommon", "rare", "mythic", "token", null,
+  ]);
+  assert.deepEqual(sortCards(items, { key: "rarity", direction: "descending" }).map((item) => item.rarity), [
+    "mythic", "rare", "uncommon", "common", "token", null,
+  ]);
+});
+
+test("sorts sets by their release dates in both directions, with undated sets last", () => {
+  const items = [
+    { name: "Zeta", setCode: "BLB" },
+    { name: "Alpha", setCode: "ZZZ" },
+    { name: "Beta", setCode: "DMU" },
+    { name: "Delta", setCode: "TDMU" },
+  ];
+  const dates = { DMU: "2022-09-09", TDMU: "2022-09-09", BLB: "2024-08-02" };
+  const sortedSets = (direction) => sortCards(items, { key: "setCode", direction }, dates)
+    .map(({ setCode }) => setCode);
+  assert.deepEqual(sortedSets("ascending"), ["DMU", "TDMU", "BLB", "ZZZ"]);
+  assert.deepEqual(sortedSets("descending"), ["BLB", "DMU", "TDMU", "ZZZ"]);
+});

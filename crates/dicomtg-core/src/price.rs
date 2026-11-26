@@ -49,6 +49,7 @@ impl ReferencePrice {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PriceImport {
     pub(crate) prices: Vec<ReferencePrice>,
+    pub(crate) set_release_dates: BTreeMap<String, String>,
 }
 
 impl PriceImport {
@@ -156,7 +157,10 @@ pub fn import_mtgjson_prices_json(reader: impl Read) -> Result<PriceImport, Pric
     if prices.is_empty() {
         Err(PriceImportError::EmptyPrices)
     } else {
-        Ok(PriceImport { prices })
+        Ok(PriceImport {
+            prices,
+            set_release_dates: BTreeMap::new(),
+        })
     }
 }
 
@@ -186,7 +190,9 @@ pub fn import_cardmarket_price_guide_with_products_and_sets(
     let products: CardmarketProductFile = serde_json::from_reader(products_reader)?;
     let sets: MtgjsonSetListFile = serde_json::from_reader(sets_reader)?;
     let resolved_ids = resolve_cardmarket_product_ids(catalog, &products.products, &sets.data);
-    import_cardmarket_price_guide_with_ids(reader, catalog, &resolved_ids)
+    let mut prices = import_cardmarket_price_guide_with_ids(reader, catalog, &resolved_ids)?;
+    prices.set_release_dates = sets.release_dates();
+    Ok(prices)
 }
 
 fn import_cardmarket_price_guide_with_ids(
@@ -256,7 +262,10 @@ fn import_cardmarket_price_guide_with_ids(
     if prices.is_empty() {
         Err(PriceImportError::EmptyPrices)
     } else {
-        Ok(PriceImport { prices })
+        Ok(PriceImport {
+            prices,
+            set_release_dates: BTreeMap::new(),
+        })
     }
 }
 
@@ -628,6 +637,40 @@ struct CardmarketProduct {
 #[derive(Deserialize)]
 struct MtgjsonSetListFile {
     data: Vec<MtgjsonSet>,
+}
+
+pub(crate) fn import_set_release_dates(
+    reader: impl Read,
+) -> Result<BTreeMap<String, String>, PriceImportError> {
+    let sets: MtgjsonSetListFile = serde_json::from_reader(reader)?;
+    Ok(sets.release_dates())
+}
+
+impl MtgjsonSetListFile {
+    fn release_dates(&self) -> BTreeMap<String, String> {
+        let dated = self
+            .data
+            .iter()
+            .filter_map(|set| {
+                set.release_date
+                    .as_deref()
+                    .filter(|date| valid_iso_date(date))
+                    .map(|date| (set, date))
+            });
+        let mut dates = dated
+            .clone()
+            .map(|(set, date)| (set.code.trim().to_ascii_uppercase(), date.to_owned()))
+            .collect::<BTreeMap<_, _>>();
+        for (set, date) in dated {
+            if let Some(token_code) = set.token_set_code.as_deref() {
+                dates
+                    .entry(token_code.trim().to_ascii_uppercase())
+                    .or_insert_with(|| date.to_owned());
+            }
+        }
+        dates.remove("");
+        dates
+    }
 }
 
 #[derive(Deserialize)]

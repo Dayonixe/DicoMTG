@@ -4,12 +4,17 @@ use std::{
     fs::{self, File},
     io::{self, Write},
     path::Path,
+    time::Duration,
 };
+
+use flate2::read::GzDecoder;
+use ureq::Agent;
 
 use crate::{
     CollectionStore, PriceImportError, StorageError, import_cardmarket_price_guide,
     import_cardmarket_price_guide_with_products_and_sets,
     mtgjson_update::{TemporaryArchive, UpdateFileError, download_archive, http_agent},
+    price::import_set_release_dates,
 };
 
 const PRICES_URL: &str =
@@ -136,6 +141,34 @@ pub fn update_prices_from_cardmarket(
     sets_file.flush()?;
     drop(sets_file);
     install_cardmarket_data(store, temporary.path(), products.path(), sets.path())
+}
+
+pub fn initialize_set_release_dates(
+    store: &mut CollectionStore,
+    temporary_directory: impl AsRef<Path>,
+) -> Result<bool, PriceUpdateError> {
+    if store.has_set_release_dates()? {
+        return Ok(false);
+    }
+    let temporary_directory = temporary_directory.as_ref();
+    fs::create_dir_all(temporary_directory)?;
+    let agent = Agent::new_with_config(
+        Agent::config_builder()
+            .https_only(true)
+            .timeout_global(Some(Duration::from_secs(15)))
+            .build(),
+    );
+    let (sets, mut file) =
+        TemporaryArchive::create(temporary_directory, "set-release-dates.json.gz")?;
+    download_archive(&agent, &format!("{SETS_URL}.gz"), &mut file, MAX_DOWNLOAD_BYTES)?;
+    file.flush()?;
+    drop(file);
+    let dates = import_set_release_dates(GzDecoder::new(File::open(sets.path())?))?;
+    if dates.is_empty() {
+        return Ok(false);
+    }
+    store.save_set_release_dates(&dates)?;
+    Ok(true)
 }
 
 pub fn install_cardmarket_price_guide(

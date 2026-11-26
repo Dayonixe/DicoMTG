@@ -1674,6 +1674,15 @@ tbody tr:last-child td {
   background: var(--surface);
 }
 
+.card-detail + .card-detail {
+  margin-top: 1rem;
+}
+
+.card-variant-title {
+  margin: 0 0 1rem;
+  font-size: 1.15rem;
+}
+
 .card-image-frame {
   position: relative;
   display: grid;
@@ -1850,18 +1859,74 @@ tbody tr:last-child td {
   font-size: 0.8rem;
 }
 
-.card-detail-rules {
+.card-detail-reference {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 1rem;
   margin-top: 1rem;
+}
+
+.card-detail-reference > section {
   padding: 1rem;
   border: 1px solid var(--border);
   border-radius: 0.55rem;
   background: var(--surface-raised);
 }
 
-.card-detail-rules h3 {
+.card-detail-reference h3 {
   margin: 0 0 0.55rem;
   color: var(--gold-soft);
   font-size: 0.9rem;
+}
+
+.card-legality-list {
+  max-width: 31rem;
+  margin: 0;
+  columns: 2 11.75rem;
+  column-gap: 0.85rem;
+}
+
+.card-legality-list > div {
+  display: grid;
+  grid-template-columns: 7.25rem minmax(0, 1fr);
+  align-items: center;
+  column-gap: 0.5rem;
+  margin-bottom: 0.3rem;
+  break-inside: avoid;
+}
+
+.card-legality-list dt {
+  grid-area: 1 / 2;
+  font-size: 0.85rem;
+}
+
+.card-legality-list dd {
+  grid-area: 1 / 1;
+  margin: 0;
+  padding: 0.22rem 0.3rem;
+  border-radius: 0.25rem;
+  background: #343641;
+  color: #e0e1e7;
+  font-size: 0.74rem;
+  font-weight: 650;
+  text-align: center;
+}
+
+.card-legality-list [data-status="legal"] {
+  background: #2b4a36;
+  color: #9cdda4;
+}
+
+.card-legality-list [data-status="banned"] {
+  background: #513034;
+  color: var(--danger);
+}
+
+.card-legality-list [data-status="restricted"],
+.card-legality-list [data-status="suspended"] {
+  background: #4a392a;
+  color: var(--warning);
 }
 
 .card-detail-rules p {
@@ -1888,6 +1953,13 @@ tbody tr:last-child td {
   grid-template-columns: repeat(auto-fit, minmax(210px, 260px));
   gap: 1.5rem;
   align-items: start;
+}
+
+.related-token-gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 7.5rem), 9.125rem));
+  align-items: start;
+  gap: 1rem;
 }
 
 .card-printing {
@@ -2130,7 +2202,8 @@ tbody tr:last-child td {
     flex-wrap: wrap;
   }
 
-  .card-detail-grid {
+  .card-detail-grid,
+  .card-detail-reference {
     grid-template-columns: 1fr;
   }
 

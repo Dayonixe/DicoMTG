@@ -74,6 +74,13 @@ test("builds the Scryfall image URL for a matched printing", () => {
   );
 });
 
+test("uses the Scryfall ID for linked tokens outside the collection", () => {
+  assert.equal(
+    cardImageUrl({ scryfallId: "5feddbd0-3d29-4428-b70d-107c1e26930d" }, "small"),
+    "https://cards.scryfall.io/small/front/5/f/5feddbd0-3d29-4428-b70d-107c1e26930d.jpg",
+  );
+});
+
 test("formats missing detail values without implicit zero", () => {
   assert.equal(formatOptionalText(null), "Indisponible");
   assert.equal(formatOptionalText(""), "Indisponible");

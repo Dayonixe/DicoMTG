@@ -21,7 +21,8 @@ pub use card_image::{
     CardImageSize, card_image_cache_stats, clear_card_image_cache, load_card_image,
 };
 pub use card_localization::{
-    CardLocalization, CardLocalizationError, find_card_french_text, load_card_localization,
+    CardLegalities, CardLocalization, CardLocalizationError, RelatedToken, find_card_french_text,
+    find_english_related_tokens, load_card_localization,
 };
 pub use collection::{
     CardFinish, CollectionBuildError, CollectionSnapshot, OwnedPrinting, UnresolvedCard,
@@ -45,8 +46,8 @@ pub use price::{
     is_valid_iso_date,
 };
 pub use price_update::{
-    PriceUpdateError, PriceUpdateSummary, install_cardmarket_data, install_cardmarket_price_guide,
-    update_prices_from_cardmarket,
+    PriceUpdateError, PriceUpdateSummary, initialize_set_release_dates, install_cardmarket_data,
+    install_cardmarket_price_guide, update_prices_from_cardmarket,
 };
 pub use storage::{CardEdhrecStats, CollectionStore, StorageError, StoredCollection};
 

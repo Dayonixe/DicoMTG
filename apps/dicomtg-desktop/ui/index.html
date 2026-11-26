@@ -185,43 +185,69 @@
           <a href="#collection">Ouvrir la liste des cartes</a>
         </div>
 
-        <article id="card-detail-content" class="card-detail" hidden>
-          <div class="card-detail-data">
-            <dl id="card-detail-facts" class="card-detail-grid"></dl>
-            <section class="card-edhrec-gauges" aria-label="Indicateurs EDHREC">
-              <article id="card-edhrec-salt" class="card-edhrec-gauge" data-empty>
-                <h3>Salt Score</h3>
-                <div class="card-edhrec-dial">
-                  <svg viewBox="0 0 224 112" aria-hidden="true">
-                    <path class="card-edhrec-track" d="M 16 112 A 96 96 0 0 1 208 112"></path>
-                    <path data-gauge-fill d="M 16 112 A 96 96 0 0 1 208 112" pathLength="1" stroke-dasharray="0 1"></path>
-                  </svg>
-                  <output data-gauge-value aria-label="Salt Score EDHREC">Indisponible</output>
-                </div>
-                <p>sur 4</p>
-              </article>
-              <article id="card-edhrec-rank" class="card-edhrec-gauge" data-empty>
-                <h3>Ratio de classement</h3>
-                <div class="card-edhrec-dial">
-                  <svg viewBox="0 0 224 112" aria-hidden="true">
-                    <path class="card-edhrec-track" d="M 16 112 A 96 96 0 0 1 208 112"></path>
-                    <path data-gauge-fill d="M 16 112 A 96 96 0 0 1 208 112" pathLength="1" stroke-dasharray="0 1"></path>
-                  </svg>
-                  <output data-gauge-value aria-label="Ratio de classement">Indisponible</output>
-                </div>
-                <p id="card-edhrec-rank-position"></p>
-              </article>
+        <div id="card-detail-content" hidden></div>
+        <template id="card-detail-template">
+          <article class="card-detail">
+            <h3 class="card-variant-title" hidden></h3>
+            <div class="card-detail-data">
+              <dl class="card-detail-grid"></dl>
+              <section class="card-edhrec-gauges" aria-label="Indicateurs EDHREC">
+                <article class="card-edhrec-gauge" data-salt-gauge data-empty>
+                  <h3>Salt Score</h3>
+                  <div class="card-edhrec-dial">
+                    <svg viewBox="0 0 224 112" aria-hidden="true">
+                      <path class="card-edhrec-track" d="M 16 112 A 96 96 0 0 1 208 112"></path>
+                      <path data-gauge-fill d="M 16 112 A 96 96 0 0 1 208 112" pathLength="1" stroke-dasharray="0 1"></path>
+                    </svg>
+                    <output data-gauge-value aria-label="Salt Score EDHREC">Indisponible</output>
+                  </div>
+                  <p>sur 4</p>
+                </article>
+                <article class="card-edhrec-gauge" data-rank-gauge data-empty>
+                  <h3>Ratio de classement</h3>
+                  <div class="card-edhrec-dial">
+                    <svg viewBox="0 0 224 112" aria-hidden="true">
+                      <path class="card-edhrec-track" d="M 16 112 A 96 96 0 0 1 208 112"></path>
+                      <path data-gauge-fill d="M 16 112 A 96 96 0 0 1 208 112" pathLength="1" stroke-dasharray="0 1"></path>
+                    </svg>
+                    <output data-gauge-value aria-label="Ratio de classement">Indisponible</output>
+                  </div>
+                  <p data-rank-position></p>
+                </article>
+              </section>
+              <div class="card-detail-reference">
+                <section class="card-detail-rules" aria-label="Texte de la carte">
+                  <h3>Texte de la carte</h3>
+                  <p></p>
+                </section>
+                <section aria-label="Légalité par format">
+                  <h3>Légalité par format</h3>
+                  <dl class="card-legality-list">
+                    <div><dt>Commander</dt><dd data-format="commander">Indisponible</dd></div>
+                    <div><dt>Standard</dt><dd data-format="standard">Indisponible</dd></div>
+                    <div><dt>Modern</dt><dd data-format="modern">Indisponible</dd></div>
+                    <div><dt>Pauper</dt><dd data-format="pauper">Indisponible</dd></div>
+                    <div><dt>Legacy</dt><dd data-format="legacy">Indisponible</dd></div>
+                    <div><dt>Vintage</dt><dd data-format="vintage">Indisponible</dd></div>
+                    <div><dt>Pioneer</dt><dd data-format="pioneer">Indisponible</dd></div>
+                    <div>
+                      <dt>Limité</dt>
+                      <dd title="Selon les cartes disponibles en draft ou en paquet scellé.">Selon l’événement</dd>
+                    </div>
+                  </dl>
+                </section>
+              </div>
+            </div>
+            <section class="card-detail-printings-section" aria-label="Versions possédées">
+              <h3>Versions possédées</h3>
+              <div class="card-detail-printings"></div>
             </section>
-            <section class="card-detail-rules" aria-labelledby="card-detail-rules-title">
-              <h3 id="card-detail-rules-title">Texte de la carte</h3>
-              <p id="card-detail-rules"></p>
+            <section class="card-detail-printings-section" aria-label="Jetons associés" data-related-tokens hidden>
+              <h3>Jetons associés</h3>
+              <div class="related-token-gallery"></div>
             </section>
-          </div>
-          <section class="card-detail-printings-section" aria-labelledby="card-detail-printings-title">
-            <h3 id="card-detail-printings-title">Versions possédées</h3>
-            <div id="card-detail-printings" class="card-detail-printings"></div>
-          </section>
-        </article>
+          </article>
+        </template>
       </section>
 
       <section

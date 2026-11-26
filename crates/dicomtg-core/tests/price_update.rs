@@ -68,7 +68,12 @@ fn price_004_product_catalog_resolves_tokens_without_an_mtgjson_id() -> Result<(
             {"idProduct":99,"name":"A Mysterious Creature Token (Colorless 2/2)","idExpansion":7}
         ]
     }"#;
-    let sets = r#"{"data":[]}"#;
+    let sets = r#"{"data":[
+        {"code":"TST","releaseDate":"2024-08-02","tokenSetCode":"TTST"},
+        {"code":"TTST","releaseDate":"2024-08-03"},
+        {"code":"OLD","releaseDate":"2000-01-01","tokenSetCode":"told"},
+        {"code":"BAD","releaseDate":"2024-02-30"}
+    ]}"#;
     fs::write(&guide_path, guide)?;
     fs::write(&products_path, products)?;
     fs::write(&sets_path, sets)?;
@@ -87,6 +92,19 @@ fn price_004_product_catalog_resolves_tokens_without_an_mtgjson_id() -> Result<(
         result.downloaded_bytes(),
         (guide.len() + products.len() + sets.len()) as u64
     );
+    assert_eq!(
+        store.load_set_release_dates()?,
+        [
+            ("OLD", "2000-01-01"),
+            ("TOLD", "2000-01-01"),
+            ("TST", "2024-08-02"),
+            ("TTST", "2024-08-03"),
+        ]
+        .into_iter()
+        .map(|(code, date)| (code.to_owned(), date.to_owned()))
+        .collect()
+    );
+    assert!(!dicomtg_core::initialize_set_release_dates(&mut store, &sets_path)?);
     assert!(
         store
             .load_prices()?

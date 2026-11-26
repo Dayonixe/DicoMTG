@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     io::Cursor,
     path::PathBuf,
     sync::{
@@ -9,12 +9,14 @@ use std::{
 };
 
 use dicomtg_core::{
-    CardImageCacheStats, CardImageFace, CardImageSize, CollectionItemStatus, CollectionListItem,
-    CollectionQuery, CollectionSnapshot, CollectionStore, DistributionEntry, ImportError,
-    MatchResult, RowIssueReason, analyze_collection, analyze_collection_by_type, build_collection,
-    card_image_cache_stats, clear_card_image_cache,
+    CardImageCacheStats, CardImageFace, CardImageSize, CardLegalities, CollectionItemStatus,
+    CollectionListItem, CollectionQuery, CollectionSnapshot, CollectionStore, DistributionEntry,
+    ImportError, MatchResult, RelatedToken, RowIssueReason, analyze_collection,
+    analyze_collection_by_type, build_collection, card_image_cache_stats, clear_card_image_cache,
     download_collection_csv as fetch_collection_csv, find_card_french_text,
-    google_drive_source_url, import_collection_csv as parse_collection_csv, is_valid_iso_date,
+    find_english_related_tokens,
+    google_drive_source_url, import_collection_csv as parse_collection_csv,
+    initialize_set_release_dates, is_valid_iso_date,
     load_card_image, load_card_localization as fetch_card_localization, most_expensive_card,
     query_collection, rematch_collection, update_catalog_from_mtgjson,
     update_prices_from_cardmarket,
@@ -72,6 +74,7 @@ pub struct DashboardDto {
     most_expensive_card: Option<CollectionItemDto>,
     items: Vec<CollectionItemDto>,
     diagnostics: DiagnosticsDto,
+    set_release_dates: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -220,6 +223,7 @@ pub struct ReferenceUpdateDto {
     catalog_cards: usize,
     reference_prices: usize,
     update_date: String,
+    set_dates_initialized: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -237,6 +241,9 @@ pub struct CardLocalizationDto {
     french_text: Option<String>,
     fallback_text: Option<String>,
     oracle_id: Option<String>,
+    legalities: Option<CardLegalities>,
+    related_tokens: Vec<RelatedToken>,
+    needs_english_token_lookup: bool,
 }
 
 pub(crate) fn build_dashboard(
@@ -294,6 +301,9 @@ pub(crate) fn build_dashboard(
         most_expensive_card,
         items,
         diagnostics,
+        set_release_dates: store
+            .load_set_release_dates()
+            .map_err(|error| error.to_string())?,
     })
 }
 
@@ -732,6 +742,7 @@ pub async fn update_reference_data(
             catalog_cards: 0,
             reference_prices: 0,
             update_date: local_date,
+            set_dates_initialized: false,
         });
     }
 
@@ -769,6 +780,8 @@ fn refresh_reference_data(
         local_date,
         force,
     ) {
+        let set_dates_initialized =
+            initialize_set_release_dates(store, update_directory).unwrap_or(false);
         let (catalog_cards, reference_prices) = store
             .reference_counts()
             .map_err(|error| error.to_string())?;
@@ -777,6 +790,7 @@ fn refresh_reference_data(
             catalog_cards,
             reference_prices,
             update_date: local_date.to_owned(),
+            set_dates_initialized,
         });
     }
 
@@ -821,6 +835,7 @@ fn refresh_reference_data(
         catalog_cards: catalog.card_count(),
         reference_prices: prices.price_count(),
         update_date: local_date.to_owned(),
+        set_dates_initialized: false,
     })
 }
 
@@ -928,6 +943,9 @@ pub fn load_card_localization(
             french_text: localization.french_text().map(str::to_owned),
             fallback_text: localization.fallback_text().map(str::to_owned),
             oracle_id: localization.oracle_id().map(str::to_owned),
+            legalities: localization.legalities(),
+            related_tokens: localization.related_tokens().to_vec(),
+            needs_english_token_lookup: localization.needs_english_token_lookup(),
         })
         .map_err(|error| error.to_string())?;
     state
@@ -941,6 +959,16 @@ pub fn load_card_localization(
 #[tauri::command(async)]
 pub fn load_card_french_text(oracle_id: String) -> Result<Option<String>, String> {
     find_card_french_text(&oracle_id).map_err(|error| error.to_string())
+}
+
+#[tauri::command(async)]
+pub fn load_card_related_tokens(
+    set_code: String,
+    collector_number: String,
+    oracle_id: String,
+) -> Result<Vec<RelatedToken>, String> {
+    find_english_related_tokens(&set_code, &collector_number, &oracle_id)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command(async)]

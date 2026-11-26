@@ -37,6 +37,39 @@ export function findCardsByName(cards, search) {
   return cards.filter((card) => normalized(card.name) === name);
 }
 
+function isToken(card) {
+  return normalized(card.rarity) === "token"
+    || card.types?.some((type) => normalized(type) === "token")
+    || /^token\b/.test(normalized(card.typeLine));
+}
+
+function tokenVariantKey(card) {
+  const text = (value) => normalized(value).replace(/\s+/g, " ");
+  const values = (list) => [...new Set((list ?? []).map(text).filter(Boolean))].sort();
+  return JSON.stringify([
+    text(card.power),
+    text(card.toughness),
+    text(card.typeLine).replace(/^token /, "") || values(card.types).join(" "),
+    text(card.rulesText),
+    values(card.keywords),
+    values(card.colors),
+    values(card.colorIdentity),
+  ]);
+}
+
+export function groupCardVariants(cards) {
+  if (!cards.some(isToken)) return [{ kind: "card", cards }];
+
+  const groups = new Map();
+  for (const card of cards) {
+    const kind = isToken(card) ? "token" : card.uuid ? "card" : "unresolved";
+    const key = kind === "token" ? tokenVariantKey(card) : kind;
+    if (!groups.has(key)) groups.set(key, { kind, cards: [] });
+    groups.get(key).cards.push(card);
+  }
+  return [...groups.values()];
+}
+
 const printingCollator = new Intl.Collator("fr", { numeric: true, sensitivity: "base" });
 
 export function groupCardPrintings(cards) {

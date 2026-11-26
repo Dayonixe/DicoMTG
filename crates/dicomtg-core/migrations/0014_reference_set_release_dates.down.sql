@@ -1,0 +1,1 @@
+DROP TABLE reference_set_release_dates;

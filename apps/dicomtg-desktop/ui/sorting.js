@@ -1,14 +1,19 @@
 import { finishLabel, statusLabel } from "./formatters.js";
 
 const collator = new Intl.Collator("fr", { numeric: true, sensitivity: "base" });
+const rarityRanks = new Map([
+  ["common", 0],
+  ["uncommon", 1],
+  ["rare", 2],
+  ["mythic", 3],
+]);
 
 const sortValues = {
   name: (item) => item.name,
-  setCode: (item) => item.setCode,
   collectorNumber: (item) => item.collectorNumber,
   quantity: (item) => item.quantity,
   finish: (item) => finishLabel(item.finish),
-  rarity: (item) => item.rarity,
+  rarity: (item) => rarityRanks.get(item.rarity),
   colors: (item) => (item.colors.length ? item.colors.join(" ") : null),
   manaValue: (item) => item.manaValue,
   priceCents: (item) => item.priceCents,
@@ -41,8 +46,10 @@ export function nextCardSort(current, key) {
   };
 }
 
-export function sortCards(items, sort = DEFAULT_CARD_SORT) {
-  const valueFor = sortValues[sort.key] ?? sortValues.name;
+export function sortCards(items, sort = DEFAULT_CARD_SORT, setReleaseDates = {}) {
+  const valueFor = sort.key === "setCode"
+    ? (item) => Object.hasOwn(setReleaseDates, item.setCode) ? setReleaseDates[item.setCode] : null
+    : sortValues[sort.key] ?? sortValues.name;
   const direction = sort.direction === "descending" ? -1 : 1;
 
   return [...items].sort((left, right) => {
@@ -59,6 +66,15 @@ export function sortCards(items, sort = DEFAULT_CARD_SORT) {
           ? leftValue - rightValue
           : collator.compare(String(leftValue), String(rightValue));
       if (comparison !== 0) return comparison * direction;
+    }
+    if (sort.key === "setCode") {
+      const byCode = collator.compare(left.setCode ?? "", right.setCode ?? "");
+      if (byCode !== 0) return byCode;
+    }
+    if (sort.key === "rarity" && leftMissing) {
+      const byRarity = Number(!left.rarity) - Number(!right.rarity)
+        || collator.compare(left.rarity ?? "", right.rarity ?? "");
+      if (byRarity !== 0) return byRarity;
     }
     return collator.compare(left.name, right.name);
   });

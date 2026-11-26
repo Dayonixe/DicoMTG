@@ -4,6 +4,7 @@ import test from "node:test";
 import { runInNewContext } from "node:vm";
 
 import { overviewMetrics } from "./charts.js";
+import { findCardsByName, groupCardPrintings, groupCardVariants } from "./card-search.js";
 import { cardsTableCsv } from "./csv-export.js";
 import { PAGE_IDS, pageFromHash } from "./navigation.js";
 
@@ -114,8 +115,8 @@ test("reserves an accessible printing gallery and overview image", () => {
     readFileSync(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"),
   );
 
-  assert.match(html, /id="card-detail-printings"/);
-  assert.match(html, /id="card-detail-rules"/);
+  assert.match(html, /class="card-detail-printings"/);
+  assert.match(html, /class="card-detail-rules"/);
   assert.match(html, /id="most-expensive-card"/);
   assert.match(html, /id="most-expensive-image"/);
   assert.match(html, /id="most-expensive-image-state"[^>]*aria-live="polite"/);
@@ -267,13 +268,62 @@ test("groups the card detail by name and removes printing-specific facts", () =>
   assert.doesNotMatch(script, /\["Langue"|Prix de référence|Date du prix/);
 });
 
+test("shows one Wurm detail with separate quantities, rules and galleries", () => {
+  const script = readFileSync(new URL("./app.js", import.meta.url), "utf8");
+  const render = script.slice(
+    script.indexOf("function renderCardDetailVariant("),
+    script.indexOf("function renderMostExpensiveCard("),
+  );
+  const wurm = { name: "Wurm", rarity: "token", typeLine: "Token Creature — Wurm" };
+  const large = { ...wurm, uuid: "large", power: "5", toughness: "5", quantity: 2 };
+  const small = {
+    ...wurm, uuid: "small", power: "3", toughness: "3", quantity: 1,
+    keywords: ["Lifelink"], rulesText: "Lifelink",
+  };
+  const title = {};
+  const displayed = [];
+  const createBlock = () => {
+    const fields = {
+      ".card-variant-title": {},
+      ".card-edhrec-gauges": { remove() {} },
+      ".card-detail-grid": {},
+      ".card-detail-rules p": {},
+      ".card-detail-printings": [],
+    };
+    return { fields, querySelector: (selector) => fields[selector], setAttribute() {} };
+  };
+  runInNewContext(render + "\nshowCardDetail(small);", {
+    small, findCardsByName, groupCardPrintings, groupCardVariants,
+    searchableCards: [large, small],
+    cardDetailTitle: title, cardDetailSearch: {}, cardDetailSearchError: {},
+    cardDetailContent: { append: (...blocks) => displayed.push(...blocks) },
+    cardDetailTemplate: { content: {} }, cardDetailEmpty: {}, cardDetailRequestId: 0,
+    document: { importNode: createBlock }, window: { requestAnimationFrame() {} },
+    hideCardPreview() {}, clearCardDetail() {}, loadCardEdhrecStats() {},
+    localizeCardVariants() {}, navigateToPage() {}, refreshCardDetailEdhrecStats: null,
+    distributionLabel: (_subject, label) => label, formatCount: String,
+    formatList: (values) => values.join(", "), formatOptionalText: (value) => value ?? "",
+    createManaSymbolText() {}, createColorSymbols() {},
+    appendDetailFact: (target, label, value) => { target[label] = value; },
+    setManaSymbolText: (target, text) => { target.textContent = text; },
+    renderCardPrinting: (item, gallery) => gallery.push(item.uuid),
+  });
+  assert.equal(title.textContent, "Wurm");
+  assert.deepEqual(displayed.map(({ fields }) => [
+    fields[".card-variant-title"].textContent,
+    fields[".card-detail-grid"]["Quantité possédée"],
+    fields[".card-detail-rules p"].textContent,
+    fields[".card-detail-printings"],
+  ]), [["Jeton 5/5", "2", "", ["large"]], ["Jeton 3/3 · Lifelink", "1", "Lifelink", ["small"]]]);
+});
+
 test("keeps the rules panel text-only and prefers French rules to received English text", async () => {
   const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");
   const rules = html.slice(
-    html.indexOf('aria-labelledby="card-detail-rules-title"'),
-    html.indexOf('aria-labelledby="card-detail-printings-title"'),
+    html.indexOf('class="card-detail-rules"'),
+    html.indexOf('class="card-detail-printings-section"'),
   );
-  assert.match(rules, /id="card-detail-rules"/);
+  assert.match(rules, /<h3>Texte de la carte<\/h3>\s*<p><\/p>/);
   assert.doesNotMatch(rules, /<img\b|Texte français sur la carte imprimée/);
 
   const script = readFileSync(new URL("./app.js", import.meta.url), "utf8");
@@ -289,10 +339,9 @@ test("keeps the rules panel text-only and prefers French rules to received Engli
     const shownTexts = [];
     let finishSecondPrinting;
     let finishAlternateLookup;
-    const localization = runInNewContext(localize + "\nlocalizeCardDetail(printings, 1);", {
-      printings,
+    const localization = runInNewContext(localize + "\nlocalizeCardDetail(detail, 1);", {
+      detail: { printings, rules: {} },
       cardDetailRequestId: 1,
-      cardDetailRules: {},
       setManaSymbolText: (_node, text) => shownTexts.push(text),
       alternateFrenchTextRequests: new Map(),
       invoke: async (command, { collectorNumber, oracleId }) => {
@@ -341,11 +390,10 @@ test("looks for other French printings only once per card across repeated visits
   const searches = [];
   const texts = [];
   await runInNewContext(
-    localize + "\n(async () => { await localizeCardDetail(printings, 1); await localizeCardDetail(printings, 1); })();",
+    localize + "\n(async () => { await localizeCardDetail(detail, 1); await localizeCardDetail(detail, 1); })();",
     {
-      printings,
+      detail: { printings, rules: {} },
       cardDetailRequestId: 1,
-      cardDetailRules: {},
       alternateFrenchTextRequests: new Map(),
       setManaSymbolText: (_node, text) => texts.push(text),
       invoke: async (command, payload) => {
@@ -361,15 +409,166 @@ test("looks for other French printings only once per card across repeated visits
   assert.deepEqual(texts, ["Piochez une carte.", "Piochez une carte."]);
 });
 
+test("renders the card's format legalities and ignores stale metadata", async () => {
+  const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");
+  const script = readFileSync(new URL("./app.js", import.meta.url), "utf8");
+  const localize = script.slice(
+    script.indexOf("function renderCardLegalities("),
+    script.indexOf("function renderEdhrecGauge("),
+  );
+  const formats = [...html.matchAll(/<dd data-format="([^"]+)">/g)].map(([, format]) => ({
+    dataset: { format },
+  }));
+  assert.deepEqual(formats.map(({ dataset }) => dataset.format), [
+    "commander", "standard", "modern", "pauper", "legacy", "vintage", "pioneer",
+  ]);
+  assert.match(html, /<dt>Limité<\/dt>\s*<dd[^>]*>Selon l’événement<\/dd>/);
+
+  const requests = [];
+  const context = {
+    cardDetailRequestId: 1,
+    detail: {
+      legalities: { querySelectorAll: () => formats },
+      printings: [{ item: { setCode: "TST", collectorNumber: "1" }, setName: {} }],
+    },
+    invoke(command) {
+      assert.equal(command, "load_card_localization");
+      return new Promise((resolve) => requests.push(resolve));
+    },
+  };
+  const first = runInNewContext(localize + "\nlocalizeCardDetail(detail, 1);", context);
+  context.cardDetailRequestId = 2;
+  const current = runInNewContext(
+    "renderCardLegalities(detail.legalities, null); localizeCardDetail(detail, 2);",
+    context,
+  );
+  assert.ok(formats.every(({ textContent }) => textContent === "Indisponible"));
+  requests[1]({
+    legalities: {
+      commander: "legal", standard: "not_legal", modern: "banned",
+      pauper: "not_legal", legacy: "legal", vintage: "restricted",
+    },
+  });
+  await current;
+  requests[0]({ legalities: { commander: "banned" } });
+  await first;
+  assert.deepEqual(formats.map(({ textContent }) => textContent), [
+    "Légale", "Non légale", "Bannie", "Non légale", "Légale", "Restreinte", "Indisponible",
+  ]);
+});
+
+test("displays distinct linked tokens below owned printings and loads visible thumbnails", async () => {
+  const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");
+  const script = readFileSync(new URL("./app.js", import.meta.url), "utf8");
+  assert.match(html, /Versions possédées[\s\S]*?<section[^>]+data-related-tokens hidden>/);
+  const observerCode = script.slice(
+    script.indexOf("const relatedTokenImages ="),
+    script.indexOf("const PREVIEW_HOVER_DELAY_MS"),
+  );
+  const localize = script.slice(
+    script.indexOf("function appendRelatedTokens("),
+    script.indexOf("function renderEdhrecGauge("),
+  );
+  const createElement = () => ({
+    children: [],
+    append(...children) { this.children.push(...children); },
+  });
+  const gallery = createElement();
+  const section = { hidden: true, querySelector: () => gallery };
+  const first = { scryfallId: "deathtouch", name: "Wurm", typeLine: "Artifact Creature" };
+  const second = { ...first, scryfallId: "lifelink" };
+  const observed = [];
+  const loaded = [];
+  let notify;
+  await runInNewContext(observerCode + localize + "\nlocalizeCardDetail(detail, 1);", {
+    document: { createElement },
+    IntersectionObserver: class {
+      constructor(callback) { notify = (entries) => callback(entries, this); }
+      observe(frame) { observed.push(frame); }
+      unobserve() {}
+    },
+    createCardImageFrame: () => ({ frame: { isConnected: true }, image: {}, imageState: {} }),
+    showCardImage: (token, _image, _state, size) => loaded.push([token.scryfallId, size]),
+    cardDetailRequestId: 1,
+    detail: {
+      relatedTokens: section,
+      printings: ["223", "224"].map((collectorNumber) => ({
+        item: { setCode: "SOM", collectorNumber }, setName: {},
+      })),
+    },
+    invoke: async (_command, { collectorNumber }) => ({
+      setName: "Scars of Mirrodin",
+      relatedTokens: collectorNumber === "223" ? [first] : [first, second],
+    }),
+  });
+  assert.equal(section.hidden, false);
+  assert.deepEqual(gallery.children.map((figure) => figure.children[1].children[0].textContent), ["Wurm", "Wurm"]);
+  assert.equal(observed.length, 2);
+  notify([{ target: observed[0], isIntersecting: false }]);
+  assert.deepEqual(loaded, []);
+  observed[1].isConnected = false;
+  notify(observed.map((target) => ({ target, isIntersecting: true })));
+  assert.deepEqual(loaded, [["deathtouch", "small"]]);
+});
+
+test("shows French rules before loading English token links and reuses the lookup", async () => {
+  const script = readFileSync(new URL("./app.js", import.meta.url), "utf8");
+  const code = script.slice(
+    script.indexOf("function loadEnglishRelatedTokens("),
+    script.indexOf("async function localizeCardVariants("),
+  );
+  const rules = {};
+  const links = [];
+  let lookups = 0;
+  let finishLookup;
+  const metadata = {
+    setName: "Dominaria United", frenchText: "Créez un jeton Oiseau.",
+    oracleId: "aether-channeler", needsEnglishTokenLookup: true,
+  };
+  const token = { scryfallId: "bird-printing", name: "Bird" };
+  const context = {
+    cardDetailRequestId: 1,
+    detail: {
+      printings: [{ item: { setCode: "DMU", collectorNumber: "42" }, setName: {} }],
+      rules, relatedTokens: {},
+    },
+    englishRelatedTokenRequests: new Map(),
+    invoke: async (command, payload) => {
+      if (command === "load_card_localization") return metadata;
+      assert.equal(command, "load_card_related_tokens");
+      assert.equal(payload.oracleId, "aether-channeler");
+      assert.equal(payload.setCode, "DMU");
+      assert.equal(payload.collectorNumber, "42");
+      lookups++;
+      return new Promise((resolve) => { finishLookup = () => resolve([token]); });
+    },
+    appendRelatedTokens: (_section, tokens) => links.push(...tokens),
+    setManaSymbolText: (target, text) => { target.text = text; },
+  };
+  const first = runInNewContext(code + "\nlocalizeCardDetail(detail, 1);", context);
+  await new Promise(setImmediate);
+  assert.equal(rules.text, "Créez un jeton Oiseau.");
+  assert.equal(lookups, 1);
+  assert.deepEqual(links, []);
+  context.cardDetailRequestId = 2;
+  finishLookup();
+  await first;
+  assert.deepEqual(links, []);
+
+  await runInNewContext("localizeCardDetail(detail, 2);", context);
+  assert.equal(lookups, 1);
+  assert.deepEqual(links, [token]);
+});
+
 test("displays the EDHREC gauges with independent values and the actual rank", async () => {
   const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");
   const script = readFileSync(new URL("./app.js", import.meta.url), "utf8");
   const gauges = script.slice(
     script.indexOf("function renderEdhrecGauge("),
-    script.indexOf("function showCardDetail("),
+    script.indexOf("function renderCardDetailVariant("),
   );
-  assert.match(html, /id="card-edhrec-salt"[\s\S]*?pathLength="1"/);
-  assert.match(html, /id="card-edhrec-rank"[\s\S]*?pathLength="1"/);
+  assert.match(html, /data-salt-gauge[\s\S]*?pathLength="1"/);
+  assert.match(html, /data-rank-gauge[\s\S]*?pathLength="1"/);
   assert.match(html, /<h3>Ratio de classement<\/h3>/);
 
   function gauge() {
@@ -401,12 +600,14 @@ test("displays the EDHREC gauges with independent values and the actual rank", a
       assert.equal(uuid, "printing-id");
       return stats;
     };
-    await runInNewContext(gauges + '\nloadCardEdhrecStats("printing-id", 1);', {
+    const nodes = {
+      "[data-salt-gauge]": cardEdhrecSalt,
+      "[data-rank-gauge]": cardEdhrecRank,
+      "[data-rank-position]": cardEdhrecRankPosition,
+    };
+    await runInNewContext(gauges + "\nloadCardEdhrecStats(detail, 1);", {
       cardDetailRequestId: 1,
-      cardEdhrecLookupId: 0,
-      cardEdhrecSalt,
-      cardEdhrecRank,
-      cardEdhrecRankPosition,
+      detail: { uuid: "printing-id", edhrecLookupId: 0, block: { querySelector: (selector) => nodes[selector] } },
       formatCount: String,
       invoke,
     });
@@ -463,15 +664,15 @@ test("a late EDHREC response cannot clear an updated card", async () => {
   const script = readFileSync(new URL("./app.js", import.meta.url), "utf8");
   const lookup = script.slice(
     script.indexOf("async function loadCardEdhrecStats("),
-    script.indexOf("function showCardDetail("),
+    script.indexOf("function renderCardDetailVariant("),
   );
   const requests = [];
   const rendered = [];
   const completed = runInNewContext(
-    lookup + '\nPromise.all([loadCardEdhrecStats("id", 1), loadCardEdhrecStats("id", 1)]);',
+    lookup + "\nPromise.all([loadCardEdhrecStats(detail, 1), loadCardEdhrecStats(detail, 1)]);",
     {
       cardDetailRequestId: 1,
-      cardEdhrecLookupId: 0,
+      detail: { uuid: "id", edhrecLookupId: 0 },
       invoke: () => new Promise((resolve) => requests.push(resolve)),
       renderCardEdhrecStats: (stats) => rendered.push(stats.rank),
     },

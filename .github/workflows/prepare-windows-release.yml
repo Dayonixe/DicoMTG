@@ -1,9 +1,8 @@
 name: Préparer la release Windows
 
 on:
-  push:
-    tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+'
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       release_notes:
@@ -16,7 +15,10 @@ permissions:
 
 jobs:
   windows:
-    if: github.repository == 'Dayonixe/DicoMTG' && (github.event_name != 'push' || !github.event.deleted)
+    if: >-
+      github.repository == 'Dayonixe/DicoMTG' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (!github.event.release.prerelease && startsWith(github.ref, 'refs/tags/v')))
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -32,8 +34,8 @@ jobs:
           $version = $config.version
           if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Version Windows invalide" }
           $tag = "v$version"
-          if ($env:GITHUB_EVENT_NAME -eq 'push' -and $env:GITHUB_REF_NAME -cne $tag) {
-            throw "Le tag poussé doit être $tag pour cette version."
+          if ($env:GITHUB_EVENT_NAME -eq 'release' -and $env:GITHUB_REF_NAME -cne $tag) {
+            throw "Le tag de la release doit être $tag pour cette version."
           }
           $tagCommit = git rev-parse "refs/tags/${tag}^{commit}"
           if ($LASTEXITCODE -ne 0 -or $tagCommit -ne (git rev-parse HEAD)) {
@@ -79,20 +81,13 @@ jobs:
         shell: pwsh
         env:
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
-          RELEASE_NOTES: ${{ inputs.release_notes }}
         run: |
           $version = $env:RELEASE_VERSION
-          $notes = $env:RELEASE_NOTES
-          if ([string]::IsNullOrWhiteSpace($notes)) {
-            [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-            $tagRef = "refs/tags/v$version"
-            if ((git cat-file -t $tagRef) -eq 'tag') {
-              $notes = ((git for-each-ref --format='%(contents)' $tagRef) -join "`n").TrimEnd()
-              $tagSignature = ((git for-each-ref --format='%(contents:signature)' $tagRef) -join "`n").TrimEnd()
-              if ($tagSignature -and $notes.EndsWith($tagSignature, [StringComparison]::Ordinal)) {
-                $notes = $notes.Substring(0, $notes.Length - $tagSignature.Length).TrimEnd()
-              }
-            }
+          $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json
+          $notes = if ($env:GITHUB_EVENT_NAME -eq 'release') {
+            [string]$event.release.body
+          } else {
+            [string]$event.inputs.release_notes
           }
           $file = "DicoMTG_${version}_x64-setup.exe"
           $bundle = "target/release/bundle/nsis"

@@ -134,7 +134,10 @@ fn edhrec_rank_upgrade_schedules_one_refresh_and_keeps_the_catalog() -> Result<(
     drop(store);
 
     let connection = rusqlite::Connection::open(&path)?;
-    connection.execute("DELETE FROM schema_migrations WHERE version = 13", [])?;
+    connection.execute_batch(include_str!(
+        "../migrations/0014_reference_set_release_dates.down.sql"
+    ))?;
+    connection.execute("DELETE FROM schema_migrations WHERE version >= 13", [])?;
     connection.execute(
         "INSERT INTO reference_update_state (singleton, last_successful_date)
          VALUES (1, '2026-11-26')",

@@ -1,6 +1,6 @@
 use std::{error::Error, fmt, io::Read, sync::LazyLock, time::Duration};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use ureq::Agent;
 
 use crate::card_image::{encode_path_segment, is_scryfall_id};
@@ -21,6 +21,9 @@ pub struct CardLocalization {
     french_text: Option<String>,
     fallback_text: Option<String>,
     oracle_id: Option<String>,
+    legalities: Option<CardLegalities>,
+    related_tokens: Vec<RelatedToken>,
+    needs_english_token_lookup: bool,
 }
 
 impl CardLocalization {
@@ -43,6 +46,52 @@ impl CardLocalization {
     pub fn oracle_id(&self) -> Option<&str> {
         self.oracle_id.as_deref()
     }
+
+    #[must_use]
+    pub fn legalities(&self) -> Option<CardLegalities> {
+        self.legalities
+    }
+
+    #[must_use]
+    pub fn related_tokens(&self) -> &[RelatedToken] {
+        &self.related_tokens
+    }
+
+    #[must_use]
+    pub fn needs_english_token_lookup(&self) -> bool {
+        self.needs_english_token_lookup
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelatedToken {
+    scryfall_id: String,
+    name: String,
+    type_line: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub struct CardLegalities {
+    commander: Option<CardLegality>,
+    standard: Option<CardLegality>,
+    modern: Option<CardLegality>,
+    pauper: Option<CardLegality>,
+    legacy: Option<CardLegality>,
+    vintage: Option<CardLegality>,
+    pioneer: Option<CardLegality>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CardLegality {
+    Legal,
+    NotLegal,
+    Banned,
+    Restricted,
+    Suspended,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug)]
@@ -90,12 +139,23 @@ impl From<serde_json::Error> for CardLocalizationError {
 
 #[derive(Debug, Deserialize)]
 struct ScryfallCard {
+    id: Option<String>,
     set_name: String,
     oracle_id: Option<String>,
     lang: Option<String>,
     oracle_text: Option<String>,
     printed_text: Option<String>,
     card_faces: Option<Vec<ScryfallFace>>,
+    legalities: Option<CardLegalities>,
+    all_parts: Option<Vec<ScryfallRelatedCard>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ScryfallRelatedCard {
+    id: String,
+    component: String,
+    name: String,
+    type_line: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -111,6 +171,26 @@ struct ScryfallCardList {
 }
 
 impl ScryfallCard {
+    fn take_related_tokens(&mut self) -> Vec<RelatedToken> {
+        let card_id = self.id.as_deref();
+        self.all_parts
+            .take()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|part| {
+                part.component == "token"
+                    && is_scryfall_id(&part.id)
+                    && card_id != Some(part.id.as_str())
+                    && !part.name.trim().is_empty()
+            })
+            .map(|part| RelatedToken {
+                scryfall_id: part.id.to_ascii_lowercase(),
+                name: part.name,
+                type_line: part.type_line,
+            })
+            .collect()
+    }
+
     fn printed_rules(&self, require_french: bool) -> Option<String> {
         let oracle_text = self.oracle_text.as_deref().filter(|_| require_french);
         if let Some(text) = usable_printed_text(self.printed_text.as_deref(), oracle_text) {
@@ -156,11 +236,10 @@ pub fn load_card_localization(
     })
 }
 
-fn load_card_localization_with(
+fn printing_url(
     set_code: &str,
     collector_number: &str,
-    mut download: impl FnMut(&str) -> Result<Option<Vec<u8>>, CardLocalizationError>,
-) -> Result<CardLocalization, CardLocalizationError> {
+) -> Result<String, CardLocalizationError> {
     let set_code = set_code.trim();
     let collector_number = collector_number.trim();
     if set_code.is_empty() || set_code.len() > 32 {
@@ -172,19 +251,25 @@ fn load_card_localization_with(
         ));
     }
 
-    let card_url = |language: &str| {
-        format!(
-            "https://api.scryfall.com/cards/{}/{}/{language}",
-            encode_path_segment(&set_code.to_ascii_lowercase()),
-            encode_path_segment(collector_number),
-        )
-    };
-    let (card, is_french) = if let Some(bytes) = download(&card_url("fr"))? {
+    Ok(format!(
+        "https://api.scryfall.com/cards/{}/{}",
+        encode_path_segment(&set_code.to_ascii_lowercase()),
+        encode_path_segment(collector_number),
+    ))
+}
+
+fn load_card_localization_with(
+    set_code: &str,
+    collector_number: &str,
+    mut download: impl FnMut(&str) -> Result<Option<Vec<u8>>, CardLocalizationError>,
+) -> Result<CardLocalization, CardLocalizationError> {
+    let url = printing_url(set_code, collector_number)?;
+    let (mut card, is_french) = if let Some(bytes) = download(&format!("{url}/fr"))? {
         let card: ScryfallCard = serde_json::from_slice(&bytes)?;
         let is_french = card.lang.as_deref() == Some("fr");
         (card, is_french)
     } else {
-        let bytes = download(&card_url("en"))?.ok_or(CardLocalizationError::Unavailable)?;
+        let bytes = download(&format!("{url}/en"))?.ok_or(CardLocalizationError::Unavailable)?;
         (serde_json::from_slice(&bytes)?, false)
     };
     let french_text = is_french.then(|| card.printed_rules(true)).flatten();
@@ -193,12 +278,50 @@ fn load_card_localization_with(
     } else {
         None
     };
+    let related_tokens = card.take_related_tokens();
+    let needs_english_token_lookup =
+        is_french && related_tokens.is_empty() && card.oracle_id.is_some();
     Ok(CardLocalization {
         set_name: card.set_name,
         french_text,
         fallback_text,
         oracle_id: card.oracle_id,
+        legalities: card.legalities,
+        related_tokens,
+        needs_english_token_lookup,
     })
+}
+
+pub fn find_english_related_tokens(
+    set_code: &str,
+    collector_number: &str,
+    oracle_id: &str,
+) -> Result<Vec<RelatedToken>, CardLocalizationError> {
+    find_english_related_tokens_with(set_code, collector_number, oracle_id, |url| {
+        download_json(&SCRYFALL_AGENT, url)
+    })
+}
+
+fn find_english_related_tokens_with(
+    set_code: &str,
+    collector_number: &str,
+    oracle_id: &str,
+    download: impl FnOnce(&str) -> Result<Option<Vec<u8>>, CardLocalizationError>,
+) -> Result<Vec<RelatedToken>, CardLocalizationError> {
+    if !is_scryfall_id(oracle_id) {
+        return Err(CardLocalizationError::InvalidRequest(
+            "invalid Oracle identifier",
+        ));
+    }
+    let url = printing_url(set_code, collector_number)?;
+    let Some(bytes) = download(&format!("{url}/en"))? else {
+        return Ok(Vec::new());
+    };
+    let mut card: ScryfallCard = serde_json::from_slice(&bytes)?;
+    if card.oracle_id.as_deref() != Some(oracle_id) {
+        return Ok(Vec::new());
+    }
+    Ok(card.take_related_tokens())
 }
 
 pub fn find_card_french_text(oracle_id: &str) -> Result<Option<String>, CardLocalizationError> {
@@ -273,6 +396,116 @@ mod tests {
 
         assert_eq!(localization.set_name(), "Commander 2021");
         assert_eq!(localization.french_text(), Some("Ajoutez deux manas."));
+        assert!(localization.legalities().is_none());
+        assert!(localization.related_tokens().is_empty());
+    }
+
+    #[test]
+    fn returns_only_direct_token_links_from_the_card_response() {
+        let localization = load_card_localization_with("som", "223", |url| {
+            assert!(url.ends_with("/som/223/fr"));
+            Ok(Some(
+                br#"{"set_name":"Scars of Mirrodin","lang":"fr",
+                    "id":"00000000-0000-4000-8000-000000000001",
+                    "all_parts":[
+                        {"id":"00000000-0000-4000-8000-000000000002","component":"token","name":"Wurm","type_line":"Token Artifact Creature"},
+                        {"id":"00000000-0000-4000-8000-000000000003","component":"token","name":"Wurm","type_line":"Token Artifact Creature"},
+                        {"id":"00000000-0000-4000-8000-000000000001","component":"token","name":"Self","type_line":""},
+                        {"id":"00000000-0000-4000-8000-000000000004","component":"combo_piece","name":"Other card","type_line":""},
+                        {"id":"invalid","component":"token","name":"Invalid card","type_line":""}
+                    ]}"#
+                    .to_vec(),
+            ))
+        })
+        .unwrap();
+
+        assert_eq!(
+            serde_json::to_value(localization.related_tokens()).unwrap(),
+            serde_json::json!([
+                {"scryfallId":"00000000-0000-4000-8000-000000000002","name":"Wurm","typeLine":"Token Artifact Creature"},
+                {"scryfallId":"00000000-0000-4000-8000-000000000003","name":"Wurm","typeLine":"Token Artifact Creature"}
+            ])
+        );
+    }
+
+    #[test]
+    fn finds_english_token_links_when_the_french_printing_omits_them() {
+        for (set, number, oracle_id, token_id, name) in [
+            (
+                "dmu",
+                "42",
+                "fb220f46-f8b8-4804-baa4-e7d50b4871f7",
+                "5f3034f6-145f-4e60-9e55-c4054fd8e70f",
+                "Bird",
+            ),
+            (
+                "dsk",
+                "118",
+                "bd388ad9-a47b-4b0b-b94a-8e4343cd3de5",
+                "bba307eb-814c-4c87-acdf-b54c87d04f82",
+                "Demon",
+            ),
+            (
+                "blb",
+                "116",
+                "8d72ddb3-ef6e-4847-b6d4-5d85b1dd5802",
+                "5379a77e-4b98-4abc-b967-fbc76bb85fc6",
+                "Starscape Cleric",
+            ),
+        ] {
+            let localization = load_card_localization_with(set, number, |url| {
+                assert!(url.ends_with(&format!("/{set}/{number}/fr")));
+                Ok(Some(serde_json::to_vec(&serde_json::json!({
+                    "set_name": "Set",
+                    "lang": "fr",
+                    "oracle_id": oracle_id,
+                    "printed_text": "Texte français."
+                }))?))
+            })
+            .unwrap();
+            assert_eq!(localization.french_text(), Some("Texte français."));
+            assert!(localization.needs_english_token_lookup());
+
+            let links = super::find_english_related_tokens_with(set, number, oracle_id, |url| {
+                assert!(url.ends_with(&format!("/{set}/{number}/en")));
+                Ok(Some(serde_json::to_vec(&serde_json::json!({
+                    "set_name": "Set",
+                    "oracle_id": oracle_id,
+                    "all_parts": [{
+                        "id": token_id, "name": name, "component": "token", "type_line": "Token Creature"
+                    }]
+                }))?))
+            })
+            .unwrap();
+            assert_eq!(links.len(), 1);
+            assert_eq!(links[0].scryfall_id, token_id);
+            assert_eq!(links[0].name, name);
+        }
+    }
+
+    #[test]
+    fn returns_card_legalities_with_the_existing_metadata_request() {
+        let localization = load_card_localization_with("tst", "1", |url| {
+            assert!(url.ends_with("/tst/1/fr"));
+            Ok(Some(
+                br#"{"set_name":"Test Set","lang":"fr","legalities":{
+                    "commander":"legal","standard":"not_legal","modern":"banned",
+                    "pauper":"not_legal","legacy":"legal","vintage":"restricted",
+                    "pioneer":"new_status","brawl":"legal"
+                }}"#
+                    .to_vec(),
+            ))
+        })
+        .unwrap();
+
+        assert_eq!(
+            serde_json::to_value(localization.legalities()).unwrap(),
+            serde_json::json!({
+                "commander": "legal", "standard": "not_legal", "modern": "banned",
+                "pauper": "not_legal", "legacy": "legal", "vintage": "restricted",
+                "pioneer": "unknown"
+            })
+        );
     }
 
     #[test]

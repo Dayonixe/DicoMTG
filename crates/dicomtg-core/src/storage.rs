@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     error::Error,
     fmt,
     path::Path,
@@ -58,6 +58,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (
         13,
         include_str!("../migrations/0013_refresh_edhrec_ranks.up.sql"),
+    ),
+    (
+        14,
+        include_str!("../migrations/0014_reference_set_release_dates.up.sql"),
     ),
 ];
 
@@ -699,8 +703,37 @@ impl CollectionStore {
             }
         }
 
+        write_set_release_dates(&transaction, &prices.set_release_dates)?;
         transaction.commit()?;
         Ok(())
+    }
+
+    pub(crate) fn save_set_release_dates(
+        &mut self,
+        dates: &BTreeMap<String, String>,
+    ) -> Result<(), StorageError> {
+        let (_writer, transaction) = self.begin_write()?;
+        write_set_release_dates(&transaction, dates)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn has_set_release_dates(&self) -> Result<bool, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM reference_set_release_dates)",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(StorageError::from)
+    }
+
+    pub fn load_set_release_dates(&self) -> Result<BTreeMap<String, String>, StorageError> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT set_code, release_date FROM reference_set_release_dates",
+        )?;
+        let dates = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        dates.collect::<Result<_, _>>().map_err(StorageError::from)
     }
 
     pub fn load_prices(&self) -> Result<Vec<ReferencePrice>, StorageError> {
@@ -1072,6 +1105,23 @@ mod tests {
         fs::remove_file(path)?;
         Ok(())
     }
+}
+
+fn write_set_release_dates(
+    transaction: &Transaction<'_>,
+    dates: &BTreeMap<String, String>,
+) -> Result<(), StorageError> {
+    if dates.is_empty() {
+        return Ok(());
+    }
+    let mut statement = transaction.prepare(
+        "INSERT INTO reference_set_release_dates (set_code, release_date) VALUES (?1, ?2)
+         ON CONFLICT (set_code) DO UPDATE SET release_date = excluded.release_date",
+    )?;
+    for (set_code, date) in dates {
+        statement.execute(params![set_code, date])?;
+    }
+    Ok(())
 }
 
 fn apply_migrations(connection: &mut Connection) -> Result<(), StorageError> {
