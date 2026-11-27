@@ -5,7 +5,7 @@ Magic: The Gathering. Importez vos listes, explorez les cartes que vous
 possédez et suivez la valeur estimée de vos collections. Vos données de
 collection sont conservées sur votre ordinateur.
 
-Version **3.4.0**.
+Version **3.4.1**.
 
 ## Installation
 

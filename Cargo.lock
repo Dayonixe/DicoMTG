@@ -593,7 +593,7 @@ dependencies = [
 
 [[package]]
 name = "dicomtg-core"
-version = "3.4.0"
+version = "3.4.1"
 dependencies = [
  "csv",
  "flate2",
@@ -606,7 +606,7 @@ dependencies = [
 
 [[package]]
 name = "dicomtg-desktop"
-version = "3.4.0"
+version = "3.4.1"
 dependencies = [
  "dicomtg-core",
  "serde",

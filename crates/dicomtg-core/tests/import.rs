@@ -61,8 +61,13 @@ fn rejects_sorted_exports_without_any_magic_folder() {
 
 #[test]
 fn col_001_and_col_002_import_dragonshield_rows_and_report_invalid_ones() {
-    let csv = include_bytes!("fixtures/dragonshield.csv");
+    let lf = include_str!("fixtures/dragonshield.csv").replace("\r\n", "\n");
+    let crlf = lf.replace('\n', "\r\n");
+    assert_dragonshield_import(lf.as_bytes());
+    assert_dragonshield_import(crlf.as_bytes());
+}
 
+fn assert_dragonshield_import(csv: &[u8]) {
     let report = import_dragonshield_csv(Cursor::new(csv)).expect("fixture should be valid CSV");
 
     assert_eq!(report.cards().len(), 1);

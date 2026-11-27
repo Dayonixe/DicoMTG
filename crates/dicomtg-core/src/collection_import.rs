@@ -171,9 +171,11 @@ pub fn import_collection_csv(mut source: impl Read) -> Result<ImportReport, Impo
             ignored_rows += 1;
             continue;
         }
-        let line = record
-            .position()
-            .map_or(0, |position| position.line() as usize + line_offset);
+        let line = record.position().map_or(0, |position| {
+            // The parser can record the position before consuming the LF of a CRLF separator.
+            let pending_lf = csv.get(position.byte() as usize) == Some(&b'\n');
+            position.line() as usize + line_offset + usize::from(pending_lf)
+        });
         match parse_record(&record, indices, line) {
             Ok(card) => cards.push(card),
             Err(issue) => issues.push(issue),
