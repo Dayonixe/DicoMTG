@@ -52,6 +52,34 @@ La première ouverture de chaque journée actualise les données de référence 
 arrière-plan. Le bouton **Actualiser** permet de forcer cette opération sans
 bloquer la navigation.
 
+## Licence
+
+Le code original de DicoMTG est sous [licence MIT](LICENSE). Les données,
+illustrations et marques de tiers restent soumises aux conditions de leurs
+titulaires respectifs.
+
+## Code signing policy
+
+La signature des versions Windows via [SignPath.io](https://signpath.io/) est
+prévue après acceptation par la [SignPath Foundation](https://signpath.org/).
+[Prawse](https://github.com/Dayonixe) maintient le dépôt, examine les
+contributions et approuve chaque demande de signature de publication.
+
+### Confidentialité
+
+Les collections, les decks et les paramètres de DicoMTG sont stockés sur votre
+ordinateur. DicoMTG n’envoie ni télémétrie ni copie de vos collections ou decks
+à un serveur.
+
+- DicoMTG interroge [Scryfall](https://scryfall.com/) avec les noms ou
+  identifiants de cartes nécessaires pour obtenir des visuels et des informations.
+- DicoMTG télécharge les données de référence de [MTGJSON](https://mtgjson.com/)
+  et les prix de [Cardmarket](https://www.cardmarket.com/).
+- [GitHub Releases](https://github.com/Dayonixe/DicoMTG/releases) fournit la
+  vérification et le téléchargement des mises à jour de l’application.
+- Lors d’un import par lien, DicoMTG se connecte à l’hébergeur du CSV. Un lien
+  Google Drive est enregistré localement pour permettre un nouvel import.
+
 ## Développement
 
 Prérequis :
