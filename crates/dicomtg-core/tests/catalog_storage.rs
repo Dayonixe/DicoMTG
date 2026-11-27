@@ -26,6 +26,7 @@ fn cat_001_catalog_round_trip_feeds_matching_and_preserves_collection() -> Resul
         .iter()
         .map(|card| card.matching_candidate())
         .collect::<Vec<_>>();
+    assert_eq!(store.load_catalog_matching_candidates()?, candidates);
     let collection_csv = "Quantity,Card Name,Set Code,Card Number\n2,Admonition Angel,WWK,1\n";
     let report = import_dragonshield_csv(Cursor::new(collection_csv))?;
     let collection = build_collection(report, &candidates)?;
@@ -134,6 +135,9 @@ fn edhrec_rank_upgrade_schedules_one_refresh_and_keeps_the_catalog() -> Result<(
     drop(store);
 
     let connection = rusqlite::Connection::open(&path)?;
+    connection.execute_batch(include_str!("../migrations/0017_catalog_refresh_state.down.sql"))?;
+    connection.execute_batch(include_str!("../migrations/0016_card_filter_metadata.down.sql"))?;
+    connection.execute_batch(include_str!("../migrations/0015_decks.down.sql"))?;
     connection.execute_batch(include_str!(
         "../migrations/0014_reference_set_release_dates.down.sql"
     ))?;

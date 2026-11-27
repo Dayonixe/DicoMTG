@@ -26,7 +26,7 @@
         <a href="#sets" data-nav-page="sets">Extensions</a>
         <a href="#rarities" data-nav-page="rarities">Raretés</a>
         <a href="#collection" data-nav-page="collection">Cartes</a>
-        <a href="#deck" data-nav-page="deck">Construction de deck</a>
+        <a href="#deck" data-nav-page="deck">Decks</a>
         <a href="#data" data-nav-page="data">Données</a>
       </div>
     </nav>
@@ -645,6 +645,7 @@
               <label><input type="checkbox" name="color" value="B" /><span data-mana-symbol="{B}"></span></label>
               <label><input type="checkbox" name="color" value="R" /><span data-mana-symbol="{R}"></span></label>
               <label><input type="checkbox" name="color" value="G" /><span data-mana-symbol="{G}"></span></label>
+              <label title="Incolore"><input type="checkbox" name="color" value="C" aria-label="Incolore" /><span data-mana-symbol="{C}"></span></label>
             </div>
           </fieldset>
 
@@ -660,6 +661,77 @@
           </div>
 
           <button id="apply-filters" type="submit">Appliquer</button>
+          <div class="card-colors-exact">
+            <label><input id="card-colors-exact" type="checkbox" /> <span id="card-colors-exact-label">Exactement ces couleurs</span></label>
+          </div>
+          <details class="card-filters-advanced" id="card-filters-advanced">
+            <summary>Paramètres avancés</summary>
+            <div class="card-filters-grid">
+              <div class="field">
+                <label for="filter-card-text">Texte de la carte</label>
+                <input id="filter-card-text" name="text" type="search" />
+              </div>
+              <div class="field">
+                <label for="filter-card-type">Type de carte</label>
+                <select id="filter-card-type" name="type"><option value="">Tous les types</option></select>
+              </div>
+              <div class="field">
+                <label for="filter-card-subtype">Sous-type de la carte</label>
+                <input id="filter-card-subtype" name="subtype" type="search" list="filter-card-subtypes" autocomplete="off" placeholder="Ex. Angel ou Saga" />
+                <datalist id="filter-card-subtypes"></datalist>
+              </div>
+              <div class="field">
+                <label for="filter-card-legendary">Légendaire</label>
+                <select id="filter-card-legendary" name="legendary">
+                  <option value="">Indifférent</option>
+                  <option value="yes">Oui</option>
+                  <option value="no">Non</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="filter-card-color-mode">Correspondance des couleurs</label>
+                <select id="filter-card-color-mode" name="colorMode">
+                  <option value="includes">Y compris ces couleurs</option>
+                  <option value="exact">Exactement ces couleurs</option>
+                  <option value="atMost">Au maximum ces couleurs</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="filter-card-format">Format</label>
+                <select id="filter-card-format" name="format">
+                  <option value="">Tous les formats</option>
+                  <option value="standard">Standard</option>
+                  <option value="pioneer">Pioneer</option>
+                  <option value="modern">Modern</option>
+                  <option value="pauper">Pauper</option>
+                  <option value="legacy">Legacy</option>
+                  <option value="vintage">Vintage</option>
+                  <option value="commander">Commander</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="filter-card-cost">Coût en mana</label>
+                <input id="filter-card-cost" name="manaCost" type="search" placeholder="Ex. {2}{B} ou 2B" />
+              </div>
+              <div class="field">
+                <label for="filter-card-mana-value">Valeur de mana</label>
+                <input id="filter-card-mana-value" name="manaValue" type="text" placeholder="Ex. 3 ou &gt;= 3" />
+              </div>
+              <div class="field">
+                <label for="filter-card-power">Force</label>
+                <input id="filter-card-power" name="power" type="text" placeholder="Ex. 2 ou *" />
+              </div>
+              <div class="field">
+                <label for="filter-card-toughness">Endurance</label>
+                <input id="filter-card-toughness" name="toughness" type="text" placeholder="Ex. 4 ou &gt; 3" />
+              </div>
+              <div class="field">
+                <label for="filter-card-loyalty">Loyauté</label>
+                <input id="filter-card-loyalty" name="loyalty" type="text" placeholder="Ex. 3 ou &gt;= 3" />
+              </div>
+            </div>
+          </details>
+          <p id="card-filters-catalog-status" class="analytics-note" role="status" hidden></p>
         </form>
 
         <div id="collection-table-shell" class="table-shell virtual-table" tabindex="0" aria-label="Tableau de la collection">
@@ -691,19 +763,119 @@
         id="deck"
         class="app-page"
         data-page="deck"
-        data-page-title="Aide à la construction de deck"
+        data-page-title="Decks"
         aria-labelledby="deck-title"
         hidden
       >
         <div class="page-heading">
           <div>
-            <h2 id="deck-title">Aide à la construction de deck</h2>
+            <h2 id="deck-title">Decks</h2>
           </div>
-          <p class="page-intro">
-            Répartissez vos terrains de base selon les couleurs de votre deck.
-          </p>
+          <div id="deck-library-actions" class="deck-actions">
+            <button type="button" data-deck-action="new">Nouveau deck</button>
+            <button type="button" data-deck-action="import">Importer un CSV</button>
+          </div>
         </div>
 
+        <div id="deck-workspace" class="deck-workspace">
+          <input id="deck-import-file" type="file" accept=".csv,text/csv" hidden />
+          <div>
+            <p id="deck-status" class="analytics-note" role="status"></p>
+            <p id="deck-load-state" class="analytics-note deck-loading" role="status" hidden></p>
+            <p id="deck-error" class="field-error" role="alert" hidden></p>
+            <section id="deck-library" aria-label="Decks enregistrés">
+              <p id="deck-empty" class="page-empty" hidden>Aucun deck enregistré.</p>
+              <ul id="saved-decks" class="deck-library-grid"></ul>
+            </section>
+            <div id="deck-editor" hidden>
+              <section class="deck-panel" aria-label="Configuration du deck">
+                <div class="deck-editor-fields">
+                  <div class="field">
+                    <label for="deck-name">Nom du deck</label>
+                    <input id="deck-name" maxlength="160" autocomplete="off" />
+                  </div>
+                  <div class="field">
+                    <label for="deck-format">Format</label>
+                    <select id="deck-format"></select>
+                  </div>
+                </div>
+                <p id="deck-commanders" class="analytics-note" hidden></p>
+                <fieldset id="deck-colors" class="color-filter"><legend>Couleurs du deck</legend></fieldset>
+                <p id="deck-progress" class="analytics-note" aria-live="polite"></p>
+                <div class="deck-actions">
+                  <button type="button" data-deck-action="back">Retour aux decks</button>
+                  <button type="button" data-deck-action="save">Enregistrer</button>
+                  <button type="button" data-deck-action="replace">Remplacer par un CSV</button>
+                  <button type="button" data-deck-action="delete">Supprimer le deck</button>
+                </div>
+              </section>
+              <div class="deck-explorer">
+                <figure class="deck-card-preview" aria-label="Aperçu de la carte">
+                  <div class="card-image-frame">
+                    <img id="deck-preview-image" class="card-detail-image" decoding="async" referrerpolicy="no-referrer" alt="" hidden />
+                    <p id="deck-preview-state">Survolez le nom d’une carte.</p>
+                  </div>
+                  <figcaption id="deck-preview-name"></figcaption>
+                </figure>
+                <div class="deck-explorer-content">
+                  <section class="deck-panel">
+                    <h3>Cartes du deck</h3>
+                    <div id="deck-card-list" class="deck-card-groups"></div>
+                    <section id="deck-associated-tokens" class="deck-associated-tokens" aria-label="Jetons associés" hidden>
+                      <hr />
+                      <h4>Jetons associés</h4>
+                      <ul id="deck-token-list" class="deck-token-list"></ul>
+                    </section>
+                  </section>
+                  <div class="deck-panel">
+                    <div class="deck-editor-fields">
+                      <div class="field">
+                        <label id="deck-search-label" for="deck-card-search">Rechercher une carte à ajouter</label>
+                        <input id="deck-card-search" type="search" autocomplete="off" />
+                      </div>
+                      <div class="field">
+                        <label for="deck-add-board">Ajouter à</label>
+                        <select id="deck-add-board"></select>
+                      </div>
+                    </div>
+                    <div id="deck-search-results" aria-label="Résultats de recherche" hidden></div>
+                    <h3>Cartes proposées</h3>
+                    <div id="deck-recommendations"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div id="deck-card-menu" class="deck-card-menu" popover="auto" aria-label="Actions de la carte"></div>
+          <div id="deck-collection-tooltip" class="deck-collection-tooltip" role="tooltip" hidden></div>
+          <dialog id="deck-quantity-dialog" aria-labelledby="deck-quantity-title">
+            <h3 id="deck-quantity-title">Ajouter des exemplaires</h3>
+            <form method="dialog">
+              <div class="field">
+                <label for="deck-quantity-add">Nombre à ajouter</label>
+                <input id="deck-quantity-add" type="number" min="1" max="4294967295" step="1" value="2" required />
+              </div>
+              <div class="deck-actions">
+                <button value="add" type="submit">Ajouter</button>
+                <button value="cancel" type="submit" formnovalidate>Annuler</button>
+              </div>
+            </form>
+          </dialog>
+          <dialog id="deck-import-dialog" aria-labelledby="deck-import-title">
+            <h3 id="deck-import-title">Importer un deck</h3>
+            <div class="field">
+              <label for="deck-import-choice">Deck du fichier CSV</label>
+              <select id="deck-import-choice"></select>
+            </div>
+            <div class="deck-actions">
+              <button type="button" data-deck-action="confirm-import">Ouvrir dans l’éditeur</button>
+              <button type="button" data-deck-action="cancel-import">Annuler</button>
+            </div>
+          </dialog>
+        </div>
+
+        <details class="deck-panel deck-land-tool">
+          <summary>Aide à la construction de deck · répartition des terrains de base</summary>
         <div class="deck-builder-layout">
           <div class="deck-builder-controls">
             <section class="deck-control-section" aria-labelledby="deck-land-settings-title">
@@ -712,8 +884,8 @@
                 <div class="deck-control">
                   <label for="deck-basic-slots">Emplacements pour les terrains de base</label>
                   <div class="deck-control-inputs">
-                    <input id="deck-basic-slots" type="number" min="0" max="40" step="1" value="24" data-deck-number="basicSlots" />
-                    <input type="range" min="0" max="40" step="1" value="24" data-deck-range="basicSlots" aria-label="Emplacements pour les terrains de base" />
+                    <input id="deck-basic-slots" type="number" min="0" max="40" step="1" value="0" data-deck-number="basicSlots" />
+                    <input type="range" min="0" max="40" step="1" value="0" data-deck-range="basicSlots" aria-label="Emplacements pour les terrains de base" />
                   </div>
                 </div>
               </div>
@@ -721,8 +893,8 @@
                 <div class="deck-control">
                   <label for="deck-lands-w">Terrains multicolores — blanc</label>
                   <div class="deck-control-inputs">
-                    <input id="deck-lands-w" type="number" min="0" max="20" step="1" value="8" data-deck-number="lands-W" />
-                    <input type="range" min="0" max="20" step="1" value="8" data-deck-range="lands-W" aria-label="Terrains multicolores fournissant du mana blanc" />
+                    <input id="deck-lands-w" type="number" min="0" max="20" step="1" value="0" data-deck-number="lands-W" />
+                    <input type="range" min="0" max="20" step="1" value="0" data-deck-range="lands-W" aria-label="Terrains multicolores fournissant du mana blanc" />
                   </div>
                 </div>
                 <div class="deck-control">
@@ -735,15 +907,15 @@
                 <div class="deck-control">
                   <label for="deck-lands-b">Terrains multicolores — noir</label>
                   <div class="deck-control-inputs">
-                    <input id="deck-lands-b" type="number" min="0" max="20" step="1" value="8" data-deck-number="lands-B" />
-                    <input type="range" min="0" max="20" step="1" value="8" data-deck-range="lands-B" aria-label="Terrains multicolores fournissant du mana noir" />
+                    <input id="deck-lands-b" type="number" min="0" max="20" step="1" value="0" data-deck-number="lands-B" />
+                    <input type="range" min="0" max="20" step="1" value="0" data-deck-range="lands-B" aria-label="Terrains multicolores fournissant du mana noir" />
                   </div>
                 </div>
                 <div class="deck-control">
                   <label for="deck-lands-r">Terrains multicolores — rouge</label>
                   <div class="deck-control-inputs">
-                    <input id="deck-lands-r" type="number" min="0" max="20" step="1" value="7" data-deck-number="lands-R" />
-                    <input type="range" min="0" max="20" step="1" value="7" data-deck-range="lands-R" aria-label="Terrains multicolores fournissant du mana rouge" />
+                    <input id="deck-lands-r" type="number" min="0" max="20" step="1" value="0" data-deck-number="lands-R" />
+                    <input type="range" min="0" max="20" step="1" value="0" data-deck-range="lands-R" aria-label="Terrains multicolores fournissant du mana rouge" />
                   </div>
                 </div>
                 <div class="deck-control">
@@ -765,8 +937,8 @@
                 <div class="deck-control">
                   <label for="deck-cards-w">Cartes avec un coût blanc</label>
                   <div class="deck-control-inputs">
-                    <input id="deck-cards-w" type="number" min="0" max="50" step="1" value="30" data-deck-number="cards-W" />
-                    <input type="range" min="0" max="50" step="1" value="30" data-deck-range="cards-W" aria-label="Cartes avec un coût blanc" />
+                    <input id="deck-cards-w" type="number" min="0" max="50" step="1" value="0" data-deck-number="cards-W" />
+                    <input type="range" min="0" max="50" step="1" value="0" data-deck-range="cards-W" aria-label="Cartes avec un coût blanc" />
                   </div>
                 </div>
                 <div class="deck-control">
@@ -779,15 +951,15 @@
                 <div class="deck-control">
                   <label for="deck-cards-b">Cartes avec un coût noir</label>
                   <div class="deck-control-inputs">
-                    <input id="deck-cards-b" type="number" min="0" max="50" step="1" value="24" data-deck-number="cards-B" />
-                    <input type="range" min="0" max="50" step="1" value="24" data-deck-range="cards-B" aria-label="Cartes avec un coût noir" />
+                    <input id="deck-cards-b" type="number" min="0" max="50" step="1" value="0" data-deck-number="cards-B" />
+                    <input type="range" min="0" max="50" step="1" value="0" data-deck-range="cards-B" aria-label="Cartes avec un coût noir" />
                   </div>
                 </div>
                 <div class="deck-control">
                   <label for="deck-cards-r">Cartes avec un coût rouge</label>
                   <div class="deck-control-inputs">
-                    <input id="deck-cards-r" type="number" min="0" max="50" step="1" value="23" data-deck-number="cards-R" />
-                    <input type="range" min="0" max="50" step="1" value="23" data-deck-range="cards-R" aria-label="Cartes avec un coût rouge" />
+                    <input id="deck-cards-r" type="number" min="0" max="50" step="1" value="0" data-deck-number="cards-R" />
+                    <input type="range" min="0" max="50" step="1" value="0" data-deck-range="cards-R" aria-label="Cartes avec un coût rouge" />
                   </div>
                 </div>
                 <div class="deck-control">
@@ -812,6 +984,7 @@
             <p id="deck-land-message" class="analytics-note"></p>
           </article>
         </div>
+        </details>
       </section>
 
       <section

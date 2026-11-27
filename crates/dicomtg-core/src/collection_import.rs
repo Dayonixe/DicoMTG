@@ -321,7 +321,7 @@ fn required_field<'a>(
     }
 }
 
-fn csv_body(bytes: &[u8]) -> (&[u8], usize) {
+pub(crate) fn csv_body(bytes: &[u8]) -> (&[u8], usize) {
     let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
     let Some(newline) = bytes.iter().position(|byte| *byte == b'\n') else {
         return (bytes, 0);

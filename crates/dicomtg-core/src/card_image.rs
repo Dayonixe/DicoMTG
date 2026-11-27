@@ -4,6 +4,7 @@ use std::{
     fs::{FileTimes, OpenOptions},
     io::{self, Read},
     path::{Path, PathBuf},
+    sync::{Mutex, MutexGuard},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -93,6 +94,114 @@ impl From<ureq::Error> for CardImageError {
     }
 }
 
+pub struct CardImageCache {
+    directory: PathBuf,
+    generation: Mutex<u64>,
+    download: Mutex<()>,
+}
+
+impl CardImageCache {
+    #[must_use]
+    pub fn new(directory: PathBuf) -> Self {
+        Self {
+            directory,
+            generation: Mutex::new(0),
+            download: Mutex::new(()),
+        }
+    }
+
+    pub fn load(
+        &self,
+        scryfall_id: Option<&str>,
+        set_code: &str,
+        collector_number: &str,
+        size: CardImageSize,
+        face: CardImageFace,
+    ) -> Result<Vec<u8>, CardImageError> {
+        self.load_with(scryfall_id, set_code, collector_number, size, face, |url| {
+            let agent = Agent::new_with_config(
+                Agent::config_builder()
+                    .https_only(true)
+                    .timeout_global(Some(Duration::from_secs(30)))
+                    .build(),
+            );
+            download_image(&agent, url)
+        })
+    }
+
+    fn load_with(
+        &self,
+        scryfall_id: Option<&str>,
+        set_code: &str,
+        collector_number: &str,
+        size: CardImageSize,
+        face: CardImageFace,
+        download: impl FnOnce(&str) -> Result<Vec<u8>, CardImageError>,
+    ) -> Result<Vec<u8>, CardImageError> {
+        let url = card_image_url(scryfall_id, set_code, collector_number, size, face)?;
+        let path = cache_path(
+            &self.directory,
+            scryfall_id,
+            set_code,
+            collector_number,
+            size,
+            face,
+        );
+        let generation = {
+            let generation = lock_cache(&self.generation)?;
+            if let Some(bytes) = read_cached_image(&path)? {
+                return Ok(bytes);
+            }
+            *generation
+        };
+
+        // Keep cold downloads serialized while allowing cached reads and eviction to proceed.
+        let _download = lock_cache(&self.download)?;
+        {
+            let _cache = lock_cache(&self.generation)?;
+            if let Some(bytes) = read_cached_image(&path)? {
+                return Ok(bytes);
+            }
+        }
+        let bytes = download(&url)?;
+        if bytes.len() > MAX_IMAGE_BYTES {
+            return Err(CardImageError::TooLarge);
+        }
+        if !is_jpeg(&bytes) {
+            return Err(CardImageError::InvalidImage);
+        }
+
+        // A clear during the download must not repopulate the cache.
+        let current = lock_cache(&self.generation)?;
+        if *current == generation {
+            fs::create_dir_all(&self.directory)?;
+            fs::write(&path, &bytes)?;
+            prune_card_image_cache(
+                &self.directory,
+                CARD_IMAGE_CACHE_CAPACITY_BYTES,
+                Some(&path),
+            )?;
+        }
+        Ok(bytes)
+    }
+
+    pub fn stats(&self) -> Result<CardImageCacheStats, CardImageError> {
+        let _cache = lock_cache(&self.generation)?;
+        card_image_cache_stats(&self.directory)
+    }
+
+    pub fn clear(&self) -> Result<CardImageCacheStats, CardImageError> {
+        let mut generation = lock_cache(&self.generation)?;
+        *generation = generation.wrapping_add(1);
+        clear_card_image_cache(&self.directory)
+    }
+}
+
+fn lock_cache<T>(lock: &Mutex<T>) -> Result<MutexGuard<'_, T>, CardImageError> {
+    lock.lock()
+        .map_err(|_| io::Error::other("local image cache lock is poisoned").into())
+}
+
 pub fn load_card_image(
     cache_directory: impl AsRef<Path>,
     scryfall_id: Option<&str>,
@@ -101,72 +210,25 @@ pub fn load_card_image(
     size: CardImageSize,
     face: CardImageFace,
 ) -> Result<Vec<u8>, CardImageError> {
-    let agent = Agent::new_with_config(
-        Agent::config_builder()
-            .https_only(true)
-            .timeout_global(Some(Duration::from_secs(30)))
-            .build(),
-    );
-    load_card_image_with(
-        cache_directory.as_ref(),
+    CardImageCache::new(cache_directory.as_ref().to_path_buf()).load(
         scryfall_id,
         set_code,
         collector_number,
         size,
         face,
-        |url| download_image(&agent, url),
     )
 }
 
-fn load_card_image_with(
-    cache_directory: &Path,
-    scryfall_id: Option<&str>,
-    set_code: &str,
-    collector_number: &str,
-    size: CardImageSize,
-    face: CardImageFace,
-    download: impl FnOnce(&str) -> Result<Vec<u8>, CardImageError>,
-) -> Result<Vec<u8>, CardImageError> {
-    let url = card_image_url(scryfall_id, set_code, collector_number, size, face)?;
-    let cache_path = cache_path(
-        cache_directory,
-        scryfall_id,
-        set_code,
-        collector_number,
-        size,
-        face,
-    );
-    match fs::read(&cache_path) {
+fn read_cached_image(path: &Path) -> Result<Option<Vec<u8>>, CardImageError> {
+    match fs::read(path) {
         Ok(bytes) if is_jpeg(&bytes) && bytes.len() <= MAX_IMAGE_BYTES => {
-            touch_cache_file(&cache_path)?;
-            prune_card_image_cache(
-                cache_directory,
-                CARD_IMAGE_CACHE_CAPACITY_BYTES,
-                Some(&cache_path),
-            )?;
-            return Ok(bytes);
+            touch_cache_file(path)?;
+            Ok(Some(bytes))
         }
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
+        Ok(_) => Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
     }
-
-    let bytes = download(&url)?;
-    if bytes.len() > MAX_IMAGE_BYTES {
-        return Err(CardImageError::TooLarge);
-    }
-    if !is_jpeg(&bytes) {
-        return Err(CardImageError::InvalidImage);
-    }
-
-    fs::create_dir_all(cache_directory)?;
-    fs::write(&cache_path, &bytes)?;
-    prune_card_image_cache(
-        cache_directory,
-        CARD_IMAGE_CACHE_CAPACITY_BYTES,
-        Some(&cache_path),
-    )?;
-    Ok(bytes)
 }
 
 pub fn card_image_cache_stats(
@@ -205,10 +267,14 @@ fn cache_entries(directory: &Path) -> Result<Vec<CacheEntry>, CardImageError> {
     let mut images = Vec::new();
     for entry in entries {
         let entry = entry?;
+        let path = entry.path();
+        if !is_cache_file(&path) {
+            continue;
+        }
         let metadata = entry.metadata()?;
-        if metadata.is_file() && is_cache_file(&entry.path()) {
+        if metadata.is_file() {
             images.push(CacheEntry {
-                path: entry.path(),
+                path,
                 bytes: metadata.len(),
                 modified: metadata.modified().unwrap_or(UNIX_EPOCH),
             });
@@ -224,6 +290,9 @@ fn prune_card_image_cache(
 ) -> Result<(), CardImageError> {
     let mut entries = cache_entries(directory)?;
     let mut total_bytes = entries.iter().map(|entry| entry.bytes).sum::<u64>();
+    if total_bytes <= capacity_bytes {
+        return Ok(());
+    }
     entries.sort_by(|left, right| {
         let left_is_protected = protected_path.is_some_and(|path| path == left.path);
         let right_is_protected = protected_path.is_some_and(|path| path == right.path);
@@ -387,8 +456,8 @@ mod tests {
     };
 
     use super::{
-        CardImageError, CardImageFace, CardImageSize, cache_path, card_image_cache_stats,
-        card_image_url, clear_card_image_cache, load_card_image_with, prune_card_image_cache,
+        CardImageCache, CardImageError, CardImageFace, CardImageSize, cache_path,
+        card_image_cache_stats, card_image_url, clear_card_image_cache, prune_card_image_cache,
     };
 
     const ID: &str = "5feddbd0-3d29-4428-b70d-107c1e26930d";
@@ -461,20 +530,21 @@ mod tests {
             line!()
         ));
         let calls = Cell::new(0);
+        let cache = CardImageCache::new(directory.clone());
 
-        let first = load_card_image_with(
-            &directory,
-            Some(ID),
-            "WWK",
-            "1",
-            CardImageSize::Normal,
-            CardImageFace::Front,
-            |_| {
-                calls.set(calls.get() + 1);
-                Ok(JPEG.to_vec())
-            },
-        )
-        .unwrap();
+        let first = cache
+            .load_with(
+                Some(ID),
+                "WWK",
+                "1",
+                CardImageSize::Normal,
+                CardImageFace::Front,
+                |_| {
+                    calls.set(calls.get() + 1);
+                    Ok(JPEG.to_vec())
+                },
+            )
+            .unwrap();
         let cached = directory.join(format!("normal-{ID}.jpg"));
         let old_modified = UNIX_EPOCH + Duration::from_secs(1);
         File::options()
@@ -483,16 +553,16 @@ mod tests {
             .unwrap()
             .set_times(FileTimes::new().set_modified(old_modified))
             .unwrap();
-        let second = load_card_image_with(
-            &directory,
-            Some(ID),
-            "WWK",
-            "1",
-            CardImageSize::Normal,
-            CardImageFace::Front,
-            |_| panic!("a cache hit must not use the network"),
-        )
-        .unwrap();
+        let second = cache
+            .load_with(
+                Some(ID),
+                "WWK",
+                "1",
+                CardImageSize::Normal,
+                CardImageFace::Front,
+                |_| panic!("a cache hit must not use the network"),
+            )
+            .unwrap();
 
         assert_eq!(first, JPEG);
         assert_eq!(second, JPEG);
@@ -509,19 +579,61 @@ mod tests {
             line!()
         ));
 
-        let error = load_card_image_with(
-            &directory,
-            Some(ID),
-            "WWK",
-            "1",
-            CardImageSize::Normal,
-            CardImageFace::Front,
-            |_| Ok(b"not an image".to_vec()),
-        )
-        .expect_err("invalid remote content must not be cached");
+        let error = CardImageCache::new(directory.clone())
+            .load_with(
+                Some(ID),
+                "WWK",
+                "1",
+                CardImageSize::Normal,
+                CardImageFace::Front,
+                |_| Ok(b"not an image".to_vec()),
+            )
+            .expect_err("invalid remote content must not be cached");
 
         assert!(matches!(error, CardImageError::InvalidImage));
         assert!(!directory.exists());
+    }
+
+    #[test]
+    fn cached_reads_and_clear_do_not_wait_for_a_download() {
+        use std::{sync::mpsc, thread};
+
+        let directory = test_directory(line!());
+        let cache = CardImageCache::new(directory.clone());
+        let (size, face) = (CardImageSize::Small, CardImageFace::Front);
+        cache
+            .load_with(None, "TST", "1", size, face, |_| Ok(JPEG.to_vec()))
+            .unwrap();
+        thread::scope(|scope| {
+            let (started, started_rx) = mpsc::channel();
+            let (release, release_rx) = mpsc::channel();
+            let (available, available_rx) = mpsc::channel();
+            let cache = &cache;
+            let cold = scope.spawn(move || {
+                cache.load_with(None, "TST", "2", size, face, |_| {
+                    started.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(JPEG.to_vec())
+                })
+            });
+            started_rx.recv().unwrap();
+            let warm = scope.spawn(move || {
+                let bytes = cache
+                    .load_with(None, "TST", "1", size, face, |_| panic!("already cached"))
+                    .unwrap();
+                available.send((bytes, cache.clear().unwrap())).unwrap();
+            });
+            let result = available_rx.recv_timeout(Duration::from_secs(2));
+            release.send(()).unwrap();
+            let (bytes, cleared) =
+                result.expect("cache access must finish while the download is paused");
+            assert_eq!(bytes, JPEG);
+            assert_eq!(cleared.image_count(), 0);
+            assert_eq!(cold.join().unwrap().unwrap(), JPEG);
+            warm.join().unwrap();
+        });
+        assert_eq!(cache.stats().unwrap().image_count(), 0);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

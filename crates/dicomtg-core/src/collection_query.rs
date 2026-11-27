@@ -56,6 +56,9 @@ pub struct CollectionListItem {
     mana_cost: Option<String>,
     power: Option<String>,
     toughness: Option<String>,
+    loyalty: Option<String>,
+    subtypes: Option<Vec<String>>,
+    legal_formats: Option<u16>,
     type_line: Option<String>,
     rules_text: Option<String>,
     price_cents: Option<u64>,
@@ -66,6 +69,21 @@ pub struct CollectionListItem {
 }
 
 impl CollectionListItem {
+    #[must_use]
+    pub fn loyalty(&self) -> Option<&str> {
+        self.loyalty.as_deref()
+    }
+
+    #[must_use]
+    pub fn subtypes(&self) -> Option<&[String]> {
+        self.subtypes.as_deref()
+    }
+
+    #[must_use]
+    pub fn legal_formats(&self) -> Option<u16> {
+        self.legal_formats
+    }
+
     #[must_use]
     pub fn uuid(&self) -> Option<&str> {
         self.uuid.as_deref()
@@ -270,6 +288,9 @@ pub fn query_collection(
             mana_cost: card.mana_cost().map(str::to_owned),
             power: card.power().map(str::to_owned),
             toughness: card.toughness().map(str::to_owned),
+            loyalty: card.loyalty.clone(),
+            subtypes: card.subtypes.clone(),
+            legal_formats: card.legal_formats,
             type_line: Some(card.type_line().to_owned()),
             rules_text: card.rules_text().map(str::to_owned),
             price_cents: price.map(ReferencePrice::amount_cents),
@@ -310,6 +331,9 @@ pub fn query_collection(
                 mana_cost: None,
                 power: None,
                 toughness: None,
+                loyalty: None,
+                subtypes: None,
+                legal_formats: None,
                 type_line: None,
                 rules_text: None,
                 price_cents: None,

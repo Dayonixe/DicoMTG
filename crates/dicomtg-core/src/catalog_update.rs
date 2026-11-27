@@ -27,6 +27,10 @@ const CARD_IDENTIFIERS_CHECKSUM_URL: &str =
 const TOKEN_IDENTIFIERS_URL: &str = "https://mtgjson.com/api/v5/csv/tokenIdentifiers.csv.gz";
 const TOKEN_IDENTIFIERS_CHECKSUM_URL: &str =
     "https://mtgjson.com/api/v5/csv/tokenIdentifiers.csv.gz.sha256";
+const LEGALITIES_URL: &str = "https://mtgjson.com/api/v5/csv/cardLegalities.csv.gz";
+const LEGALITIES_CHECKSUM_URL: &str = "https://mtgjson.com/api/v5/csv/cardLegalities.csv.gz.sha256";
+const MAX_LEGALITIES_COMPRESSED_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_LEGALITIES_DECOMPRESSED_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_COMPRESSED_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_DECOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_TOKENS_COMPRESSED_BYTES: u64 = 16 * 1024 * 1024;
@@ -40,6 +44,7 @@ const MAX_TOKEN_IDENTIFIERS_DECOMPRESSED_BYTES: u64 = 64 * 1024 * 1024;
 pub struct CatalogUpdateSummary {
     card_count: usize,
     downloaded_bytes: u64,
+    pending_rematch: Option<String>,
 }
 
 impl CatalogUpdateSummary {
@@ -51,6 +56,11 @@ impl CatalogUpdateSummary {
     #[must_use]
     pub fn downloaded_bytes(&self) -> u64 {
         self.downloaded_bytes
+    }
+
+    #[must_use]
+    pub fn pending_rematch(&self) -> Option<&str> {
+        self.pending_rematch.as_deref()
     }
 }
 
@@ -146,19 +156,68 @@ pub fn update_catalog_from_mtgjson(
     temporary_directory: impl AsRef<Path>,
 ) -> Result<CatalogUpdateSummary, CatalogUpdateError> {
     let temporary_directory = temporary_directory.as_ref();
-    fs::create_dir_all(temporary_directory)?;
     let agent = http_agent();
     let cards_checksum = download_checksum(&agent, CHECKSUM_URL)?;
     let tokens_checksum = download_checksum(&agent, TOKENS_CHECKSUM_URL)?;
     let card_identifiers_checksum = download_checksum(&agent, CARD_IDENTIFIERS_CHECKSUM_URL)?;
     let token_identifiers_checksum = download_checksum(&agent, TOKEN_IDENTIFIERS_CHECKSUM_URL)?;
+    let legalities_checksum = download_checksum(&agent, LEGALITIES_CHECKSUM_URL)?;
+    let checksums = [
+        cards_checksum.as_str(),
+        tokens_checksum.as_str(),
+        card_identifiers_checksum.as_str(),
+        token_identifiers_checksum.as_str(),
+        legalities_checksum.as_str(),
+    ];
+    // Change the prefix when the same archives need to be imported differently.
+    let fingerprint = format!("v1:{}", checksums.join(":"));
+    update_catalog_if_changed(store, fingerprint, || {
+        download_catalog_archives(&agent, temporary_directory, checksums)
+    })
+}
+
+fn update_catalog_if_changed(
+    store: &mut CollectionStore,
+    fingerprint: String,
+    load: impl FnOnce() -> Result<(CatalogImport, u64), CatalogUpdateError>,
+) -> Result<CatalogUpdateSummary, CatalogUpdateError> {
+    if let Some(rematch_pending) = store.catalog_rematch_status(&fingerprint)? {
+        return Ok(CatalogUpdateSummary {
+            card_count: store.reference_counts()?.0,
+            downloaded_bytes: 0,
+            pending_rematch: rematch_pending.then_some(fingerprint),
+        });
+    }
+    let (catalog, downloaded_bytes) = load()?;
+    let card_count = catalog.cards().len();
+    store.replace_catalog_with_fingerprint(&catalog, Some(&fingerprint))?;
+    Ok(CatalogUpdateSummary {
+        card_count,
+        downloaded_bytes,
+        pending_rematch: Some(fingerprint),
+    })
+}
+
+fn download_catalog_archives(
+    agent: &ureq::Agent,
+    temporary_directory: &Path,
+    checksums: [&str; 5],
+) -> Result<(CatalogImport, u64), CatalogUpdateError> {
+    let [
+        cards_checksum,
+        tokens_checksum,
+        card_identifiers_checksum,
+        token_identifiers_checksum,
+        legalities_checksum,
+    ] = checksums;
+    fs::create_dir_all(temporary_directory)?;
     let (cards, mut cards_file) = TemporaryArchive::create(temporary_directory, "cards.csv.gz")?;
-    download_archive(&agent, CATALOG_URL, &mut cards_file, MAX_COMPRESSED_BYTES)?;
+    download_archive(agent, CATALOG_URL, &mut cards_file, MAX_COMPRESSED_BYTES)?;
     cards_file.flush()?;
     drop(cards_file);
     let (tokens, mut tokens_file) = TemporaryArchive::create(temporary_directory, "tokens.csv.gz")?;
     download_archive(
-        &agent,
+        agent,
         TOKENS_URL,
         &mut tokens_file,
         MAX_TOKENS_COMPRESSED_BYTES,
@@ -168,7 +227,7 @@ pub fn update_catalog_from_mtgjson(
     let (card_identifiers, mut card_identifiers_file) =
         TemporaryArchive::create(temporary_directory, "cardIdentifiers.csv.gz")?;
     download_archive(
-        &agent,
+        agent,
         CARD_IDENTIFIERS_URL,
         &mut card_identifiers_file,
         MAX_IDENTIFIERS_COMPRESSED_BYTES,
@@ -178,24 +237,43 @@ pub fn update_catalog_from_mtgjson(
     let (token_identifiers, mut token_identifiers_file) =
         TemporaryArchive::create(temporary_directory, "tokenIdentifiers.csv.gz")?;
     download_archive(
-        &agent,
+        agent,
         TOKEN_IDENTIFIERS_URL,
         &mut token_identifiers_file,
         MAX_TOKEN_IDENTIFIERS_COMPRESSED_BYTES,
     )?;
     token_identifiers_file.flush()?;
     drop(token_identifiers_file);
-    install_catalog_archives_with_identifiers(
-        store,
+    let (legalities, mut file) =
+        TemporaryArchive::create(temporary_directory, "cardLegalities.csv.gz")?;
+    download_archive(
+        agent,
+        LEGALITIES_URL,
+        &mut file,
+        MAX_LEGALITIES_COMPRESSED_BYTES,
+    )?;
+    file.flush()?;
+    drop(file);
+    let legalities_bytes = verify_checksum(legalities.path(), legalities_checksum)?;
+    let (mut catalog, downloaded_bytes) = read_catalog_archives_with_identifiers(
         cards.path(),
-        &cards_checksum,
+        cards_checksum,
         tokens.path(),
-        &tokens_checksum,
+        tokens_checksum,
         card_identifiers.path(),
-        &card_identifiers_checksum,
+        card_identifiers_checksum,
         token_identifiers.path(),
-        &token_identifiers_checksum,
-    )
+        token_identifiers_checksum,
+    )?;
+    let mut limited =
+        GzDecoder::new(File::open(legalities.path())?).take(MAX_LEGALITIES_DECOMPRESSED_BYTES + 1);
+    catalog.attach_legal_formats(&mut limited)?;
+    if limited.limit() == 0 {
+        return Err(CatalogUpdateError::DecompressedTooLarge {
+            limit: MAX_LEGALITIES_DECOMPRESSED_BYTES,
+        });
+    }
+    Ok((catalog, downloaded_bytes + legalities_bytes))
 }
 
 pub fn install_catalog_archive(
@@ -210,6 +288,7 @@ pub fn install_catalog_archive(
     Ok(CatalogUpdateSummary {
         card_count,
         downloaded_bytes,
+        pending_rematch: None,
     })
 }
 
@@ -229,6 +308,7 @@ pub fn install_catalog_archives(
     Ok(CatalogUpdateSummary {
         card_count,
         downloaded_bytes: cards_bytes + tokens_bytes,
+        pending_rematch: None,
     })
 }
 
@@ -244,6 +324,36 @@ pub fn install_catalog_archives_with_identifiers(
     token_identifiers_path: impl AsRef<Path>,
     token_identifiers_checksum: &str,
 ) -> Result<CatalogUpdateSummary, CatalogUpdateError> {
+    let (catalog, downloaded_bytes) = read_catalog_archives_with_identifiers(
+        cards_path,
+        cards_checksum,
+        tokens_path,
+        tokens_checksum,
+        card_identifiers_path,
+        card_identifiers_checksum,
+        token_identifiers_path,
+        token_identifiers_checksum,
+    )?;
+    let card_count = catalog.cards().len();
+    store.replace_catalog(&catalog)?;
+    Ok(CatalogUpdateSummary {
+        card_count,
+        downloaded_bytes,
+        pending_rematch: None,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn read_catalog_archives_with_identifiers(
+    cards_path: impl AsRef<Path>,
+    cards_checksum: &str,
+    tokens_path: impl AsRef<Path>,
+    tokens_checksum: &str,
+    card_identifiers_path: impl AsRef<Path>,
+    card_identifiers_checksum: &str,
+    token_identifiers_path: impl AsRef<Path>,
+    token_identifiers_checksum: &str,
+) -> Result<(CatalogImport, u64), CatalogUpdateError> {
     let (mut catalog, cards_bytes) = read_cards_archive(cards_path, cards_checksum)?;
     let (mut tokens, tokens_bytes) = read_tokens_archive(tokens_path, tokens_checksum)?;
     let card_identifiers_bytes = attach_identifiers_archive(
@@ -259,16 +369,10 @@ pub fn install_catalog_archives_with_identifiers(
         MAX_TOKEN_IDENTIFIERS_DECOMPRESSED_BYTES,
     )?;
     catalog.extend(tokens);
-    let card_count = catalog.cards().len();
-    store.replace_catalog(&catalog)?;
-
-    Ok(CatalogUpdateSummary {
-        card_count,
-        downloaded_bytes: cards_bytes
-            + tokens_bytes
-            + card_identifiers_bytes
-            + token_identifiers_bytes,
-    })
+    Ok((
+        catalog,
+        cards_bytes + tokens_bytes + card_identifiers_bytes + token_identifiers_bytes,
+    ))
 }
 
 fn read_cards_archive(
@@ -287,6 +391,51 @@ fn read_cards_archive(
         });
     }
     Ok((catalog, downloaded_bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CatalogUpdateError, update_catalog_if_changed};
+    use crate::{CollectionStore, import_mtgjson_cards_csv};
+
+    #[test]
+    fn reuses_verified_catalog_and_preserves_pending_rematches() -> Result<(), CatalogUpdateError> {
+        let mut store = CollectionStore::in_memory()?;
+        let cards =
+            import_mtgjson_cards_csv(&include_bytes!("../tests/fixtures/mtgjson_cards.csv")[..])?;
+        let first = update_catalog_if_changed(&mut store, "before".to_owned(), || {
+            Ok((cards.clone(), 1024))
+        })?;
+        assert_eq!(first.downloaded_bytes(), 1024);
+        assert_eq!(first.pending_rematch(), Some("before"));
+        assert!(store.catalog_has_pending_rematch()?);
+
+        let retry = update_catalog_if_changed(&mut store, "before".to_owned(), || {
+            panic!("the catalogue was already installed before the interrupted refresh")
+        })?;
+        assert_eq!(retry.downloaded_bytes(), 0);
+        assert_eq!(retry.pending_rematch(), Some("before"));
+        store.mark_catalog_rematched("before")?;
+        assert!(!store.catalog_has_pending_rematch()?);
+
+        let unchanged = update_catalog_if_changed(&mut store, "before".to_owned(), || {
+            panic!("unchanged archives must not be loaded again")
+        })?;
+        assert_eq!(unchanged.card_count(), cards.cards().len());
+        assert_eq!(unchanged.downloaded_bytes(), 0);
+        assert_eq!(unchanged.pending_rematch(), None);
+
+        let changed = update_catalog_if_changed(&mut store, "after".to_owned(), || {
+            Ok((cards.clone(), 1024))
+        })?;
+        assert_eq!(changed.pending_rematch(), Some("after"));
+        store.mark_catalog_rematched("before")?;
+        assert_eq!(store.catalog_rematch_status("after")?, Some(true));
+
+        store.replace_catalog(&cards)?;
+        assert_eq!(store.catalog_rematch_status("after")?, None);
+        Ok(())
+    }
 }
 
 fn read_tokens_archive(

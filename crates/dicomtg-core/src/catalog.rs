@@ -47,6 +47,17 @@ const TOKEN_REQUIRED_HEADERS: [&str; 15] = [
     "uuid",
 ];
 
+// Bit positions match the format options in the desktop card filters.
+const CARD_FILTER_FORMATS: [&str; 7] = [
+    "standard",
+    "pioneer",
+    "modern",
+    "pauper",
+    "legacy",
+    "vintage",
+    "commander",
+];
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CatalogCard {
     pub(crate) uuid: String,
@@ -68,6 +79,9 @@ pub struct CatalogCard {
     pub(crate) mana_cost: Option<String>,
     pub(crate) power: Option<String>,
     pub(crate) toughness: Option<String>,
+    pub(crate) loyalty: Option<String>,
+    pub(crate) subtypes: Option<Vec<String>>,
+    pub(crate) legal_formats: Option<u16>,
     pub(crate) type_line: String,
     pub(crate) rules_text: Option<String>,
 }
@@ -196,6 +210,47 @@ impl CatalogImport {
         self.cards.extend(other.cards);
     }
 
+    pub(crate) fn attach_legal_formats(
+        &mut self,
+        source: impl Read,
+    ) -> Result<(), CatalogImportError> {
+        let mut reader = ReaderBuilder::new().trim(Trim::All).from_reader(source);
+        let headers = reader.headers()?.clone();
+        let uuid_index = header_position(&headers, "uuid")?;
+        let columns = CARD_FILTER_FORMATS.map(|format| header_position(&headers, format));
+        let columns = columns.into_iter().collect::<Result<Vec<_>, _>>()?;
+        let mut cards = self
+            .cards
+            .iter_mut()
+            .map(|card| (card.uuid.as_str(), &mut card.legal_formats))
+            .collect::<HashMap<_, _>>();
+        let mut matched = false;
+        for result in reader.records() {
+            let record = result?;
+            let line = record
+                .position()
+                .map_or(0, |position| position.line() as usize);
+            let uuid = required_field(&record, uuid_index, "uuid", line)?;
+            let Some(legal_formats) = cards.get_mut(uuid) else {
+                continue;
+            };
+            let mut mask = 0;
+            for (bit, column) in columns.iter().enumerate() {
+                let status = record.get(*column).unwrap_or_default();
+                if status.eq_ignore_ascii_case("legal") || status.eq_ignore_ascii_case("restricted")
+                {
+                    mask |= 1u16 << bit;
+                }
+            }
+            **legal_formats = Some(mask);
+            matched = true;
+        }
+        if !matched {
+            return Err(CatalogImportError::NoMatchingLegalities);
+        }
+        Ok(())
+    }
+
     pub(crate) fn attach_scryfall_ids(
         &mut self,
         source: impl Read,
@@ -264,6 +319,7 @@ pub enum CatalogImportError {
         reason: CatalogRowError,
     },
     EmptyCatalog,
+    NoMatchingLegalities,
 }
 
 impl fmt::Display for CatalogImportError {
@@ -277,6 +333,10 @@ impl fmt::Display for CatalogImportError {
                 write!(formatter, "invalid MTGJSON row {line}: {reason}")
             }
             Self::EmptyCatalog => write!(formatter, "MTGJSON catalog contains no cards"),
+            Self::NoMatchingLegalities => write!(
+                formatter,
+                "Les légalités MTGJSON ne correspondent à aucune carte du catalogue."
+            ),
         }
     }
 }
@@ -285,7 +345,10 @@ impl Error for CatalogImportError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Csv(error) => Some(error),
-            Self::MissingHeaders { .. } | Self::InvalidRow { .. } | Self::EmptyCatalog => None,
+            Self::MissingHeaders { .. }
+            | Self::InvalidRow { .. }
+            | Self::EmptyCatalog
+            | Self::NoMatchingLegalities => None,
         }
     }
 }
@@ -371,6 +434,8 @@ struct HeaderIndices {
     set_code: usize,
     text: usize,
     toughness: usize,
+    loyalty: Option<usize>,
+    subtypes: Option<usize>,
     type_line: usize,
     types: usize,
     uuid: usize,
@@ -408,6 +473,8 @@ impl HeaderIndices {
             set_code: header_position(headers, "setCode")?,
             text: header_position(headers, "text")?,
             toughness: header_position(headers, "toughness")?,
+            loyalty: headers.iter().position(|header| header == "loyalty"),
+            subtypes: headers.iter().position(|header| header == "subtypes"),
             type_line: header_position(headers, "type")?,
             types: header_position(headers, "types")?,
             uuid: header_position(headers, "uuid")?,
@@ -495,6 +562,11 @@ fn parse_record(
         mana_cost: optional_field(record, indices.mana_cost),
         power: optional_field(record, indices.power),
         toughness: optional_field(record, indices.toughness),
+        loyalty: indices
+            .loyalty
+            .and_then(|index| optional_field(record, index)),
+        subtypes: indices.subtypes.map(|index| list_field(record, index)),
+        legal_formats: None,
         type_line: type_line.to_owned(),
         rules_text: optional_field(record, indices.text),
     })
@@ -569,4 +641,40 @@ fn list_field(record: &StringRecord, index: usize) -> Vec<String> {
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
         .collect()
+}
+
+#[cfg(test)]
+mod filter_metadata_tests {
+    use super::import_mtgjson_cards_csv;
+    use crate::CollectionStore;
+
+    #[test]
+    fn persists_mtgjson_loyalty_subtypes_and_playable_formats()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let csv = concat!(
+            "colorIdentity,colors,finishes,keywords,language,manaCost,manaValue,name,number,power,rarity,setCode,text,toughness,type,types,uuid,loyalty,subtypes\n",
+            "U,U,nonfoil,,English,{2}{U},3,Tester,1,,rare,TST,,,Legendary Planeswalker,Planeswalker,tester,3,\"Time Lord,Wizard\"\n",
+        );
+        let mut catalog = import_mtgjson_cards_csv(csv.as_bytes())?;
+        catalog.attach_legal_formats(
+            concat!(
+                "uuid,modern,standard,pioneer,pauper,legacy,vintage,commander\n",
+                "tester,Banned,Legal,Not Legal,,Not Legal,Restricted,Not Legal\n",
+                "unrelated,Legal,Legal,Legal,Legal,Legal,Legal,Legal\n",
+            )
+            .as_bytes(),
+        )?;
+        let mut store = CollectionStore::in_memory()?;
+        assert!(!store.catalog_has_legal_formats()?);
+        store.replace_catalog(&catalog)?;
+        assert!(store.catalog_has_legal_formats()?);
+        let stored = store.load_catalog()?;
+        assert_eq!(stored[0].loyalty.as_deref(), Some("3"));
+        assert_eq!(
+            stored[0].subtypes.as_deref(),
+            Some(&["Time Lord".to_owned(), "Wizard".to_owned()][..])
+        );
+        assert_eq!(stored[0].legal_formats, Some((1 << 0) | (1 << 5)));
+        Ok(())
+    }
 }

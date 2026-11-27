@@ -3,7 +3,10 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
 
-import { overviewMetrics } from "./charts.js";
+import {
+  filterOverviewItems, mostExpensiveOverviewItem, nextChartSelection,
+  overviewDistribution, overviewDistributionFromTotals, overviewMetrics,
+} from "./charts.js";
 import { findCardsByName, groupCardPrintings, groupCardVariants } from "./card-search.js";
 import { cardsTableCsv } from "./csv-export.js";
 import { PAGE_IDS, pageFromHash } from "./navigation.js";
@@ -769,8 +772,10 @@ test("reuses facet tables until the complete collection snapshot changes", () =>
     facetAnalyses: { sets: summary },
     analysisContexts: new WeakMap(),
     virtualTables: new WeakMap(),
+    cardFilterOptionsDirty: false,
     refreshNameSuggestions() {},
     refreshDetailSuggestions() {},
+    refreshCardFilterOptions() {},
     renderFacetAnalysis() { calls.push("first"); summary.baseItems = []; },
     renderVirtualWindow() { calls.push("reopen"); },
   };
@@ -801,6 +806,53 @@ test("cross-filters every overview widget from the interactive charts", () => {
   assert.match(script, /mostExpensiveOverviewItem/);
   assert.match(script, /selectedLabels: overviewChartFilters\[kind\]/);
   assert.match(script, /onSelect: \(label, additive\)/);
+});
+
+test("renders Overview on demand and reuses totals for the chart's own filter", () => {
+  const script = readFileSync(new URL("./app.js", import.meta.url), "utf8");
+  const charts = new Map();
+  const items = [
+    { name: "Land", status: "matched", colors: [], types: ["Land"], manaValue: 0, quantity: 3, priceCents: 20 },
+    { name: "Creature", status: "matched", colors: ["B"], types: ["Creature", "Kindred"], manaValue: 2, quantity: 2, priceCents: 100 },
+    { name: "Spell", status: "matched", colors: ["R"], types: ["Instant"], manaValue: 1, quantity: 1, priceCents: 401 },
+  ];
+  const totals = {
+    colors: [{ label: "C", quantity: 3 }, { label: "B", quantity: 2 }, { label: "R", quantity: 1 }],
+    types: [{ label: "Land", quantity: 3 }, { label: "Creature", quantity: 2 }, { label: "Kindred", quantity: 2 }, { label: "Instant", quantity: 1 }],
+    manaValues: [{ label: "-0", quantity: 3 }, { label: "2", quantity: 2 }, { label: "1", quantity: 1 }],
+  };
+  const context = {
+    facetAnalyses: {},
+    overviewDashboard: { dirty: true, metrics: overviewMetrics(items), distributions: totals },
+    overviewChartFilters: { colors: [], types: [], manaValues: [] },
+    searchableCards: items,
+    chartTargets: { colors: [{}], types: [{}], manaValues: [{}] },
+    resetOverviewChartFilters: {},
+    overviewFilterSummary: {},
+    filterOverviewItems, mostExpensiveOverviewItem, nextChartSelection,
+    overviewDistribution, overviewDistributionFromTotals, overviewMetrics,
+    renderOverviewMetrics: (metrics) => { context.quantity = metrics.totalQuantity; },
+    renderMostExpensiveCard() {},
+    renderDonutChart: (kind, entries, _target, options) => charts.set(kind, { entries, options }),
+    renderManaChart: (entries, _target, options) => charts.set("manaValues", { entries, options }),
+    focusChartValue() {},
+    formatCount: String,
+  };
+  const route = script.slice(script.indexOf("function renderActiveCollectionPage("), script.indexOf("function navigateToPage("));
+  const overview = script.slice(script.indexOf("function renderOverviewAnalysis("), script.indexOf("function renderTypeOptions("));
+  runInNewContext(route + overview + '\nrenderActiveCollectionPage("data");', context);
+  assert.equal(charts.size, 0);
+  runInNewContext('renderActiveCollectionPage("overview");', context);
+  assert.equal(context.quantity, 6);
+  assert.deepEqual(charts.get("types").entries, overviewDistribution(items, "types"));
+  assert.equal(charts.get("manaValues").entries[0].label, "0");
+  const originalColors = charts.get("colors");
+  runInNewContext('renderActiveCollectionPage("overview");', context);
+  assert.equal(charts.get("colors"), originalColors);
+  charts.get("manaValues").options.onSelect("2", false);
+  assert.equal(context.quantity, 2);
+  assert.deepEqual(charts.get("colors").entries, [{ label: "B", quantity: 2 }]);
+  assert.equal(charts.get("manaValues").entries.length, 3);
 });
 
 test("places the vertical collection highlight beside the four overview metrics", () => {
@@ -934,7 +986,7 @@ test("clears the Types counters when the last collection is deselected", async (
   assert.equal(context.typeAnalysisError.hidden, true);
 });
 
-test("refreshes the complete snapshot even with a filter active on Cartes", async () => {
+test("refreshes the complete snapshot and reapplies the filter locally on Cartes", async () => {
   const script = readFileSync(new URL("./app.js", import.meta.url), "utf8");
   const context = {
     dashboardRequest: 0,
@@ -949,17 +1001,18 @@ test("refreshes the complete snapshot even with a filter active on Cartes", asyn
     clearError() {},
     setLoading() {},
     showError: assert.fail,
-    currentQuery: () => ({ search: "Filtre" }),
-    hasActiveQuery: (query) => Boolean(query.search),
-    invoke: async (_, { query }) => ({
-      items: query.search ? ["filtré"] : ["filtré", "nouveau"],
-      distributions: { types: [] },
-    }),
+    invoke: async (_, { query }) => {
+      assert.equal(query.search, "");
+      assert.equal(query.colors.length, 0);
+      return { items: ["filtré", "nouveau"], distributions: { types: [] } };
+    },
+    renderCollectionFilterResults() { context.collectionItems = context.searchableCards.filter((item) => item === "filtré"); },
     renderMetrics() {},
     renderDistributions() {},
     renderOverviewAnalysis() {},
     renderTypeOptions() {},
     renderActiveCollectionPage() {},
+    deckWorkspace: { invalidate() {} },
     renderDiagnostics() {},
   };
   context.updateSearchableCards = (items) => {
@@ -971,8 +1024,10 @@ test("refreshes the complete snapshot even with a filter active on Cartes", asyn
     script.indexOf('form.addEventListener("submit"'),
   );
   await runInNewContext(load + "\nloadDashboard(false);", context);
-  assert.deepEqual(context.searchableCards, ["ancien"]);
+  assert.deepEqual(context.searchableCards, ["filtré", "nouveau"]);
+  assert.deepEqual(context.collectionItems, ["filtré"]);
   await runInNewContext("loadDashboard(true);", context);
   assert.deepEqual(context.searchableCards, ["filtré", "nouveau"]);
+  assert.deepEqual(context.collectionItems, ["filtré"]);
   assert.equal(context.collectionSnapshotCurrent, true);
 });

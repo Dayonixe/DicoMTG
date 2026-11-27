@@ -81,6 +81,13 @@ test("uses the Scryfall ID for linked tokens outside the collection", () => {
   );
 });
 
+test("uses an exact deck printing for a catalog card outside the collection", () => {
+  assert.equal(
+    cardImageUrl({ catalogOnly: true, setCode: "SOS", collectorNumber: "13" }),
+    "https://api.scryfall.com/cards/sos/13?format=image&version=normal&face=front",
+  );
+});
+
 test("formats missing detail values without implicit zero", () => {
   assert.equal(formatOptionalText(null), "Indisponible");
   assert.equal(formatOptionalText(""), "Indisponible");

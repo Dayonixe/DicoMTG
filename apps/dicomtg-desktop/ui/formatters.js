@@ -55,7 +55,7 @@ export function cardImageUrl(item, size = "normal", face = "front") {
     return `https://cards.scryfall.io/${imageSize}/${imageFace}/${scryfallId[0]}/${scryfallId[1]}/${scryfallId}.jpg`;
   }
 
-  if (!item?.uuid || !item.setCode?.trim() || !item.collectorNumber?.trim()) {
+  if ((!item?.uuid && !item?.catalogOnly) || !item.setCode?.trim() || !item.collectorNumber?.trim()) {
     return null;
   }
   const setCode = encodeURIComponent(item.setCode.trim().toLowerCase());

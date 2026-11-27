@@ -1,7 +1,7 @@
 use std::{
     error::Error,
     fs,
-    io::Cursor,
+    io::{Cursor, Write},
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -104,13 +104,32 @@ fn price_004_product_catalog_resolves_tokens_without_an_mtgjson_id() -> Result<(
         .map(|(code, date)| (code.to_owned(), date.to_owned()))
         .collect()
     );
-    assert!(!dicomtg_core::initialize_set_release_dates(&mut store, &sets_path)?);
+    assert!(!dicomtg_core::initialize_set_release_dates(
+        &mut store, &sets_path
+    )?);
     assert!(
         store
             .load_prices()?
             .iter()
             .any(|price| price.uuid() == "mysterious" && price.amount_cents() == 28)
     );
+    let plain_prices = store.load_prices()?;
+    let plain_dates = store.load_set_release_dates()?;
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(sets.as_bytes())?;
+    let compressed = encoder.finish()?;
+    fs::write(&sets_path, &compressed)?;
+    let result = install_cardmarket_data(&mut store, &guide_path, &products_path, &sets_path)?;
+    assert_eq!(
+        result.downloaded_bytes(),
+        (guide.len() + products.len() + compressed.len()) as u64
+    );
+    assert_eq!(store.load_prices()?, plain_prices);
+    assert_eq!(store.load_set_release_dates()?, plain_dates);
+    fs::write(&sets_path, &compressed[..compressed.len() / 2])?;
+    assert!(install_cardmarket_data(&mut store, &guide_path, &products_path, &sets_path).is_err());
+    assert_eq!(store.load_prices()?, plain_prices);
+    assert_eq!(store.load_set_release_dates()?, plain_dates);
     fs::remove_file(guide_path)?;
     fs::remove_file(products_path)?;
     fs::remove_file(sets_path)?;

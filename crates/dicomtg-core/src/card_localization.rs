@@ -170,25 +170,168 @@ struct ScryfallCardList {
     data: Vec<ScryfallCard>,
 }
 
+#[derive(Deserialize)]
+struct DeckLegalityResponse {
+    data: Vec<DeckLegalityPrinting>,
+}
+
+#[derive(Deserialize)]
+struct DeckLegalityPrinting {
+    id: String,
+    name: String,
+    set: String,
+    collector_number: String,
+    legalities: Option<CardLegalities>,
+    all_parts: Option<Vec<ScryfallRelatedCard>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeckLegalityTarget {
+    name: String,
+    scryfall_id: Option<String>,
+    set_code: Option<String>,
+    collector_number: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeckCardLegality {
+    name: String,
+    legalities: Option<CardLegalities>,
+    related_tokens: Vec<RelatedToken>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+enum DeckLookup<'a> {
+    Id { id: &'a str },
+    Printing { set: &'a str, collector_number: &'a str },
+    Name { name: &'a str },
+}
+
+impl DeckLegalityTarget {
+    fn id(&self) -> Option<DeckLookup<'_>> {
+        self.scryfall_id.as_deref().filter(|id| is_scryfall_id(id)).map(|id| DeckLookup::Id { id })
+    }
+
+    fn printing(&self) -> Option<DeckLookup<'_>> {
+        let set = self.set_code.as_deref()?.trim();
+        let collector_number = self.collector_number.as_deref()?.trim();
+        (!set.is_empty() && set.len() <= 32 && !collector_number.is_empty() && collector_number.len() <= 128)
+            .then_some(DeckLookup::Printing { set, collector_number })
+    }
+
+    fn primary(&self) -> DeckLookup<'_> {
+        self.printing()
+            .or_else(|| self.id())
+            .unwrap_or(DeckLookup::Name { name: self.name.trim() })
+    }
+}
+
+impl DeckLookup<'_> {
+    fn matches(&self, card: &DeckLegalityPrinting) -> bool {
+        match self {
+            Self::Id { id } => id.eq_ignore_ascii_case(&card.id),
+            Self::Printing { set, collector_number } => {
+                set.eq_ignore_ascii_case(&card.set)
+                    && collector_number.eq_ignore_ascii_case(&card.collector_number)
+            }
+            Self::Name { name } => normalize_deck_name(name) == normalize_deck_name(&card.name),
+        }
+    }
+}
+
+fn normalize_deck_name(name: &str) -> String {
+    name.split('/').map(str::trim).filter(|part| !part.is_empty())
+        .collect::<Vec<_>>().join(" // ").to_lowercase()
+}
+
+pub fn load_deck_legalities(targets: &[DeckLegalityTarget]) -> Result<Vec<DeckCardLegality>, CardLocalizationError> {
+    load_deck_legalities_with(targets, download_deck_legalities)
+}
+
+fn load_deck_legalities_with<'a>(
+    targets: &'a [DeckLegalityTarget],
+    mut download: impl FnMut(&[DeckLookup<'a>]) -> Result<Vec<DeckLegalityPrinting>, CardLocalizationError>,
+) -> Result<Vec<DeckCardLegality>, CardLocalizationError> {
+    if targets.is_empty() || targets.len() > 75
+        || targets.iter().any(|target| target.name.trim().is_empty() || target.name.len() > 512)
+    {
+        return Err(CardLocalizationError::InvalidRequest("invalid deck card identifiers"));
+    }
+    let identifiers = targets.iter().map(DeckLegalityTarget::primary).collect::<Vec<_>>();
+    let data = download(&identifiers)?;
+    let mut matched = Vec::new();
+    let mut fallback = Vec::new();
+    for (target, identifier) in targets.iter().zip(identifiers) {
+        if let Some(card) = data.iter().find(|card| identifier.matches(card)) {
+            matched.push(deck_legality_result(target, card));
+        } else {
+            let name = normalize_deck_name(&target.name);
+            let exact_name = target.name.trim();
+            let alternate = target.id().or_else(|| target.printing()).filter(|reference| *reference != identifier)
+                .or_else(|| {
+                    let front = exact_name.split('/').next().unwrap_or(exact_name).trim();
+                    match identifier {
+                        DeckLookup::Name { .. } if front != exact_name => Some(DeckLookup::Name { name: front }),
+                        DeckLookup::Name { .. } => None,
+                        _ => Some(DeckLookup::Name { name: exact_name }),
+                    }
+                });
+            if let Some(alternate) = alternate {
+                fallback.push((target, alternate, name));
+            }
+        }
+    }
+    if !fallback.is_empty() {
+        let identifiers = fallback.iter().map(|(_, identifier, _)| *identifier).collect::<Vec<_>>();
+        if let Ok(data) = download(&identifiers) {
+            for (target, identifier, name) in fallback {
+                let card = data.iter().find(|card| {
+                    identifier.matches(card)
+                        || (matches!(identifier, DeckLookup::Name { .. })
+                            && name == normalize_deck_name(&card.name))
+                });
+                if let Some(card) = card {
+                    matched.push(deck_legality_result(target, card));
+                }
+            }
+        }
+    }
+    Ok(matched)
+}
+
+fn deck_legality_result(target: &DeckLegalityTarget, card: &DeckLegalityPrinting) -> DeckCardLegality {
+    DeckCardLegality {
+        name: target.name.clone(),
+        legalities: card.legalities,
+        related_tokens: token_links(Some(&card.id), card.all_parts.as_deref().unwrap_or_default()),
+    }
+}
+
+fn download_deck_legalities(identifiers: &[DeckLookup<'_>]) -> Result<Vec<DeckLegalityPrinting>, CardLocalizationError> {
+    let payload = serde_json::to_vec(&serde_json::json!({ "identifiers": identifiers }))?;
+    let response = SCRYFALL_AGENT
+        .post("https://api.scryfall.com/cards/collection")
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .header(
+            "User-Agent",
+            concat!("DicoMTG/", env!("CARGO_PKG_VERSION"), " (desktop collection manager)"),
+        )
+        .send(payload.as_slice())?;
+    let mut bytes = Vec::new();
+    response.into_body().into_reader().take(MAX_RESPONSE_BYTES as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_RESPONSE_BYTES {
+        return Err(CardLocalizationError::TooLarge);
+    }
+    Ok(serde_json::from_slice::<DeckLegalityResponse>(&bytes)?.data)
+}
+
 impl ScryfallCard {
     fn take_related_tokens(&mut self) -> Vec<RelatedToken> {
-        let card_id = self.id.as_deref();
-        self.all_parts
-            .take()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|part| {
-                part.component == "token"
-                    && is_scryfall_id(&part.id)
-                    && card_id != Some(part.id.as_str())
-                    && !part.name.trim().is_empty()
-            })
-            .map(|part| RelatedToken {
-                scryfall_id: part.id.to_ascii_lowercase(),
-                name: part.name,
-                type_line: part.type_line,
-            })
-            .collect()
+        token_links(self.id.as_deref(), self.all_parts.as_deref().unwrap_or_default())
     }
 
     fn printed_rules(&self, require_french: bool) -> Option<String> {
@@ -215,6 +358,19 @@ impl ScryfallCard {
         }
         (!faces.is_empty()).then(|| faces.join("\n\n"))
     }
+}
+
+fn token_links(card_id: Option<&str>, parts: &[ScryfallRelatedCard]) -> Vec<RelatedToken> {
+    parts.iter().filter(|part| {
+        part.component == "token"
+            && is_scryfall_id(&part.id)
+            && card_id != Some(part.id.as_str())
+            && !part.name.trim().is_empty()
+    }).map(|part| RelatedToken {
+        scryfall_id: part.id.to_ascii_lowercase(),
+        name: part.name.clone(),
+        type_line: part.type_line.clone(),
+    }).collect()
 }
 
 fn usable_printed_text<'a>(printed: Option<&'a str>, oracle: Option<&str>) -> Option<&'a str> {
@@ -382,6 +538,35 @@ mod tests {
     use std::cell::Cell;
 
     use super::{CardLocalizationError, find_card_french_text_with, load_card_localization_with};
+
+    #[test]
+    fn deck_legality_matches_printings_without_using_the_display_name_as_a_key() {
+        let full_name = "Emeritus of Truce // Swords to Plowshares";
+        let targets = serde_json::from_value::<Vec<super::DeckLegalityTarget>>(serde_json::json!([
+            {"name": full_name, "setCode":"SOS", "collectorNumber":"13"},
+            {"name": "Swords to Plowshares", "scryfallId":"00000000-0000-4000-8000-000000000001"}
+        ])).unwrap();
+        let result = super::load_deck_legalities_with(&targets, |lookups| {
+            assert_eq!(serde_json::to_value(lookups).unwrap(), serde_json::json!([
+                {"set":"SOS", "collector_number":"13"},
+                {"id":"00000000-0000-4000-8000-000000000001"}
+            ]));
+            Ok(serde_json::from_value(serde_json::json!([
+                {"name":"Swords to Plowshares","id":"00000000-0000-4000-8000-000000000001","set":"lea","collector_number":"40","legalities":{"standard":"not_legal"}},
+                {"name":"Emeritus of Truce","id":"00000000-0000-4000-8000-000000000002","set":"sos","collector_number":"13","legalities":{"standard":"legal"},
+                 "all_parts":[
+                     {"name":"Clue","id":"00000000-0000-4000-8000-000000000003","type_line":"Token Artifact — Clue","component":"token"},
+                     {"name":"Other","id":"00000000-0000-4000-8000-000000000004","type_line":"Artifact","component":"combo_piece"}
+                 ]}
+            ]))?)
+        }).unwrap();
+        let result = serde_json::to_value(result).unwrap();
+        assert_eq!(result[0]["name"], full_name);
+        assert_eq!(result[0]["legalities"]["standard"], "legal");
+        assert_eq!(result[0]["relatedTokens"].as_array().unwrap().len(), 1);
+        assert_eq!(result[0]["relatedTokens"][0]["name"], "Clue");
+        assert_eq!(result[1]["legalities"]["standard"], "not_legal");
+    }
 
     #[test]
     fn ui_012_returns_official_french_text_and_set_name() {

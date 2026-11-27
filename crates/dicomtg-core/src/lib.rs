@@ -7,6 +7,7 @@ mod collection;
 mod collection_download;
 mod collection_import;
 mod collection_query;
+mod decks;
 mod mtgjson_update;
 mod price;
 mod price_update;
@@ -17,13 +18,16 @@ pub use analytics::{
     analyze_collection_by_type,
 };
 pub use card_image::{
-    CARD_IMAGE_CACHE_CAPACITY_BYTES, CardImageCacheStats, CardImageError, CardImageFace,
+    CARD_IMAGE_CACHE_CAPACITY_BYTES, CardImageCache, CardImageCacheStats, CardImageError, CardImageFace,
     CardImageSize, card_image_cache_stats, clear_card_image_cache, load_card_image,
 };
 pub use card_localization::{
     CardLegalities, CardLocalization, CardLocalizationError, RelatedToken, find_card_french_text,
     find_english_related_tokens, load_card_localization,
 };
+pub use card_localization::{DeckCardLegality, DeckLegalityTarget, load_deck_legalities};
+pub use decks::{Deck, DeckCard, DeckFormat, SavedDeck, import_decks_csv};
+pub use storage::decks::{DeckCardInfo, DeckWorkspace};
 pub use collection::{
     CardFinish, CollectionBuildError, CollectionSnapshot, OwnedPrinting, UnresolvedCard,
     build_collection, rematch_collection,

@@ -23,6 +23,7 @@ import {
   mostExpensiveOverviewItem,
   nextChartSelection,
   overviewDistribution,
+  overviewDistributionFromTotals,
   overviewMetrics,
   orderedManaEntries,
   selectableTypeEntries,
@@ -33,6 +34,7 @@ import {
   groupCardPrintings,
   groupCardVariants,
 } from "./card-search.js";
+import { cardSubtypes, filterCollectionCards } from "./card-filters.js";
 import { PAGE_IDS, pageFromHash } from "./navigation.js";
 import { cardsTableCsv } from "./csv-export.js";
 import {
@@ -44,10 +46,19 @@ import {
 } from "./sorting.js";
 import { manaSymbolParts } from "./mana-symbols.js";
 import { calculateBasicLands, DECK_COLOR_CODES } from "./deck-builder.js";
+import { createDeckWorkspace } from "./deck-workspace.js";
+import { deckCardKey } from "./deck-assistant.js";
 import { setupAppUpdater } from "./app-updater.js";
 
 const form = document.querySelector("#filters");
 const collectionSearch = document.querySelector("#search");
+const cardColorMode = document.querySelector("#filter-card-color-mode");
+const exactCardColors = document.querySelector("#card-colors-exact");
+const exactCardColorsLabel = document.querySelector("#card-colors-exact-label");
+const cardFiltersAdvanced = document.querySelector("#card-filters-advanced");
+const cardTypeFilter = document.querySelector("#filter-card-type");
+const cardSubtypeSuggestions = document.querySelector("#filter-card-subtypes");
+const cardFiltersCatalogStatus = document.querySelector("#card-filters-catalog-status");
 const cardNameSuggestionsList = document.querySelector("#card-name-suggestions");
 const cardDetailSearchForm = document.querySelector("#card-detail-search-form");
 const cardDetailSearch = document.querySelector("#card-detail-search");
@@ -231,6 +242,8 @@ const typeChartFilters = { colors: [], manaValues: [] };
 const tableSortStates = new WeakMap();
 const analysisContexts = new WeakMap();
 let collectionItems = [];
+let appliedCardFilters;
+let cardFilterOptionsDirty = true;
 let setReleaseDates = {};
 let collectionRowsDirty = false;
 let collectionFrame;
@@ -247,6 +260,9 @@ const navigationLinks = document.querySelectorAll("[data-nav-page]");
 
 const tauriCore = window.__TAURI__?.core;
 const invoke = tauriCore?.invoke;
+const deckWorkspace = createDeckWorkspace(invoke, {
+  createColorSymbols, formatCount, showCardDetail, showCardImage, clearCardImage, prefillLandBuilder,
+});
 
 function showPage(page) {
   hideCardPreview();
@@ -268,9 +284,12 @@ function routeFromLocation() {
   showPage(page);
   renderActiveCollectionPage(page);
   if (page === "data") loadImageCacheStats();
+  if (page === "deck") deckWorkspace.open();
+  else deckWorkspace.close();
 }
 
 function renderActiveCollectionPage(page) {
+  if (page === "overview" && overviewDashboard?.dirty) renderOverviewAnalysis();
   const facetAnalysis = facetAnalyses[page];
   if (facetAnalysis?.entries) {
     if (!facetAnalysis.baseItems) renderFacetAnalysis(page, facetAnalysis.entries);
@@ -293,16 +312,25 @@ function navigateToPage(page) {
 
 function currentQuery() {
   const data = new FormData(form);
-  const rarity = data.get("rarity");
   return {
-    search: String(data.get("search") ?? ""),
+    ...Object.fromEntries(data),
+    name: collectionSearch.value,
     colors: data.getAll("color").map(String),
-    rarities: rarity ? [String(rarity)] : [],
   };
 }
 
-function hasActiveQuery(query) {
-  return Boolean(query.search.trim() || query.colors.length || query.rarities.length);
+function renderCollectionFilterResults() {
+  collectionItems = filterCollectionCards(searchableCards, appliedCardFilters);
+  collectionRowsDirty = true;
+  const count = collectionItems.length;
+  document.querySelector("#result-summary").textContent = `${formatCount(count)} résultat${count > 1 ? "s" : ""}`;
+  const waitingForCatalog = Boolean((appliedCardFilters?.format || appliedCardFilters?.loyalty)
+    && searchableCards.some((card) => card.uuid && card.rarity !== "token")
+    && !searchableCards.some((card) => card.legalFormats != null));
+  cardFiltersCatalogStatus.hidden = !waitingForCatalog;
+  cardFiltersCatalogStatus.textContent = waitingForCatalog
+    ? "La loyauté et la légalité par format sont disponibles après l’actualisation du catalogue dans Données."
+    : "";
 }
 
 function replaceSuggestions(list, values) {
@@ -329,6 +357,24 @@ function refreshDetailSuggestions() {
   );
 }
 
+function refreshCardFilterOptions() {
+  if (!cardFiltersAdvanced.open || !cardFilterOptionsDirty) return;
+  const selectedType = cardTypeFilter.value;
+  const types = new Set();
+  const subtypes = new Set();
+  for (const card of searchableCards) {
+    for (const type of card.types ?? []) types.add(type);
+    for (const subtype of cardSubtypes(card)) subtypes.add(subtype);
+  }
+  if (selectedType) types.add(selectedType);
+  cardTypeFilter.replaceChildren(new Option("Tous les types", ""), ...[...types]
+    .sort((a, b) => distributionLabel("types", a).localeCompare(distributionLabel("types", b), "fr"))
+    .map((type) => new Option(distributionLabel("types", type), type)));
+  cardTypeFilter.value = selectedType;
+  replaceSuggestions(cardSubtypeSuggestions, [...subtypes].sort((a, b) => a.localeCompare(b, "fr")));
+  cardFilterOptionsDirty = false;
+}
+
 function updateSearchableCards(cards) {
   searchableCards = cards;
   collectionSnapshotCurrent = true;
@@ -340,6 +386,8 @@ function updateSearchableCards(cards) {
   }
   refreshNameSuggestions();
   refreshDetailSuggestions();
+  cardFilterOptionsDirty = true;
+  refreshCardFilterOptions();
 }
 
 function setLoading(loading) {
@@ -441,7 +489,7 @@ function renderOverviewMetrics(metrics) {
   );
 }
 
-function renderMetrics(metrics, itemCount) {
+function renderMetrics(metrics) {
   renderOverviewMetrics(metrics);
   document.querySelector("#metric-coverage").textContent = formatPercent(
     metrics.priceCoverageBasisPoints,
@@ -455,7 +503,6 @@ function renderMetrics(metrics, itemCount) {
   priceStatus.textContent = metrics.referencePrices
     ? `${formatCount(metrics.referencePrices)} prix`
     : "Non installé";
-  document.querySelector("#result-summary").textContent = `${formatCount(itemCount)} résultat${itemCount > 1 ? "s" : ""}`;
 }
 
 function appendCell(row, value, className) {
@@ -704,7 +751,8 @@ function renderCardPrinting(item, gallery) {
     prices.append(price);
   }
 
-  printing.append(visual, prices);
+  printing.append(visual);
+  if (!item.catalogOnly) printing.append(prices);
   gallery.append(printing);
   showCardImage(item, image, imageState);
   return { item, setName };
@@ -944,6 +992,11 @@ function renderCardDetailVariant({ kind, cards }, showHeading) {
   const rules = block.querySelector(".card-detail-rules p");
   setManaSymbolText(rules, formatOptionalText(representative.rulesText));
   const gallery = block.querySelector(".card-detail-printings");
+  if (representative.catalogOnly) {
+    const section = gallery.closest(".card-detail-printings-section");
+    section.querySelector("h3").textContent = "Impression du catalogue";
+    section.setAttribute("aria-label", "Impression du catalogue");
+  }
   return {
     block,
     rules,
@@ -957,7 +1010,9 @@ function renderCardDetailVariant({ kind, cards }, showHeading) {
 
 function showCardDetail(item) {
   hideCardPreview();
-  const matchingCards = findCardsByName(searchableCards, item.name);
+  const matchingCards = item.catalogOnly
+    ? searchableCards.filter((card) => card.uuid && deckCardKey(card.name) === deckCardKey(item.name))
+    : findCardsByName(searchableCards, item.name);
   const cards = matchingCards.length > 0 ? matchingCards : [item];
   const representative = cards.find((card) => card.uuid) ?? cards[0];
   const requestId = ++cardDetailRequestId;
@@ -1580,6 +1635,18 @@ function deckInputValue(key) {
   return Math.min(Number(input.max), Math.max(Number(input.min), value));
 }
 
+function prefillLandBuilder({ basicLandSlots, multicolorLands, coloredCards }) {
+  for (const [key, input] of deckNumberInputs) {
+    const [kind, color] = key.split("-");
+    const value = kind === "lands" ? multicolorLands[color] : kind === "cards" ? coloredCards[color] : basicLandSlots;
+    const range = deckRangeInputs.get(key);
+    input.dataset.baseMax ??= input.max;
+    input.max = range.max = String(Math.max(Number(input.dataset.baseMax), value));
+    input.value = range.value = String(value);
+  }
+  renderDeckBuilder();
+}
+
 function renderDeckBuilder() {
   const result = calculateBasicLands({
     basicLandSlots: deckInputValue("basicSlots"),
@@ -1655,13 +1722,9 @@ function renderDeckBuilder() {
 
 function renderOverviewAnalysis() {
   if (!overviewDashboard) return;
-  const hasFilters = Object.values(overviewChartFilters).some(
-    (selected) => selected.length > 0,
-  );
-  const filteredItems = filterOverviewItems(
-    searchableCards,
-    overviewChartFilters,
-  );
+  const activeKinds = Object.keys(overviewChartFilters).filter((kind) => overviewChartFilters[kind].length);
+  const hasFilters = activeKinds.length > 0;
+  const filteredItems = hasFilters ? filterOverviewItems(searchableCards, overviewChartFilters) : [];
   const metrics = hasFilters
     ? overviewMetrics(filteredItems)
     : overviewDashboard.metrics;
@@ -1674,10 +1737,9 @@ function renderOverviewAnalysis() {
 
   for (const kind of ["colors", "types", "manaValues"]) {
     const target = chartTargets[kind][0];
-    const entries = overviewDistribution(
-      filterOverviewItems(searchableCards, overviewChartFilters, kind),
-      kind,
-    );
+    const entries = activeKinds.some((active) => active !== kind)
+      ? overviewDistribution(filterOverviewItems(searchableCards, overviewChartFilters, kind), kind)
+      : overviewDistributionFromTotals(overviewDashboard.distributions[kind], kind);
     const options = {
       selectedLabels: overviewChartFilters[kind],
       showTooltip: true,
@@ -1699,6 +1761,7 @@ function renderOverviewAnalysis() {
   overviewFilterSummary.textContent = hasFilters
     ? `${formatCount(metrics.totalQuantity)} carte${metrics.totalQuantity > 1 ? "s" : ""} dans la sélection`
     : "Cliquez sur un graphique pour filtrer toute la vue.";
+  overviewDashboard.dirty = false;
 }
 
 function renderTypeOptions(entries) {
@@ -2112,32 +2175,24 @@ async function loadDashboard(refreshSearchIndex = false) {
   statusRegion.textContent = "Chargement de la collection";
   try {
     if (!invoke) throw new Error("L’interface doit être ouverte depuis l’application DicoMTG.");
-    const query = currentQuery();
-    const dashboard = await invoke("load_dashboard", { query });
+    const dashboard = await invoke("load_dashboard", { query: { search: "", colors: [], rarities: [] } });
     if (request !== dashboardRequest) return false;
     setReleaseDates = dashboard.setReleaseDates ?? {};
-    if (!hasActiveQuery(query)) {
-      updateSearchableCards(dashboard.items);
-    } else if (!collectionSnapshotCurrent) {
-      const unfiltered = await invoke("load_dashboard", {
-        query: { search: "", colors: [], rarities: [] },
-      });
-      if (request !== dashboardRequest) return false;
-      updateSearchableCards(unfiltered.items);
-    }
-    renderMetrics(dashboard.metrics, dashboard.items.length);
+    updateSearchableCards(dashboard.items);
+    renderMetrics(dashboard.metrics);
     overviewDashboard = {
       metrics: dashboard.metrics,
       mostExpensiveCard: dashboard.mostExpensiveCard,
+      distributions: dashboard.distributions,
+      dirty: true,
     };
     renderDistributions(dashboard.distributions);
-    renderOverviewAnalysis();
     renderTypeOptions(dashboard.distributions.types);
     typeAnalysisPending = true;
     typeAnalysisRequest += 1;
-    collectionItems = dashboard.items;
-    collectionRowsDirty = true;
+    renderCollectionFilterResults();
     const page = pageFromHash(window.location.hash);
+    if (refreshSearchIndex) deckWorkspace.invalidate(page === "deck");
     if (page !== "collection") {
       virtualTables.delete(rows);
       rows.replaceChildren();
@@ -2162,8 +2217,23 @@ async function loadDashboard(refreshSearchIndex = false) {
 
 form.addEventListener("submit", (event) => {
   event.preventDefault();
-  loadDashboard();
+  appliedCardFilters = currentQuery();
+  renderCollectionFilterResults();
+  renderActiveCollectionPage("collection");
 });
+
+exactCardColors.addEventListener("change", () => {
+  cardColorMode.value = exactCardColors.checked ? "exact" : "includes";
+  exactCardColorsLabel.textContent = "Exactement ces couleurs";
+});
+
+cardColorMode.addEventListener("change", () => {
+  exactCardColors.checked = cardColorMode.value === "exact";
+  exactCardColors.indeterminate = cardColorMode.value === "atMost";
+  exactCardColorsLabel.textContent = exactCardColors.indeterminate ? "Au maximum ces couleurs" : "Exactement ces couleurs";
+});
+
+cardFiltersAdvanced.addEventListener("toggle", refreshCardFilterOptions);
 
 collectionSearch.addEventListener("input", refreshNameSuggestions);
 collectionSearch.addEventListener("focus", refreshNameSuggestions);
@@ -2386,6 +2456,7 @@ routeFromLocation();
 setCollectionImportMode(undefined);
 loadManagedCollections();
 const appUpdater = setupAppUpdater(window.__TAURI__?.core, () => importInProgress || referenceButton.disabled);
+deckWorkspace.preload();
 loadDashboard(true).then((loaded) => {
   if (loaded) refreshReferenceData(false);
   void appUpdater.check();

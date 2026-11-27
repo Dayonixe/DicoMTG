@@ -9,10 +9,13 @@ use std::{
 
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
+pub(crate) mod decks;
+
 use crate::{
-    CardFinish, CatalogCard, CatalogImport, CollectionCard, CollectionSnapshot, ImportIssue,
-    ImportedCard, MatchResult, OwnedPrinting, PriceImport, PrintingKey, ReferencePrice,
-    RowIssueReason, UnresolvedCard, collection::merge_collections, price::valid_iso_date,
+    CardCandidate, CardFinish, CatalogCard, CatalogImport, CollectionCard, CollectionSnapshot,
+    ImportIssue, ImportedCard, MatchResult, OwnedPrinting, PriceImport, PrintingKey,
+    ReferencePrice, RowIssueReason, UnresolvedCard, collection::merge_collections,
+    price::valid_iso_date,
 };
 
 const MIGRATIONS: &[(i64, &str)] = &[
@@ -62,6 +65,15 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (
         14,
         include_str!("../migrations/0014_reference_set_release_dates.up.sql"),
+    ),
+    (15, include_str!("../migrations/0015_decks.up.sql")),
+    (
+        16,
+        include_str!("../migrations/0016_card_filter_metadata.up.sql"),
+    ),
+    (
+        17,
+        include_str!("../migrations/0017_catalog_refresh_state.up.sql"),
     ),
 ];
 
@@ -523,17 +535,33 @@ impl CollectionStore {
     }
 
     pub fn replace_catalog(&mut self, catalog: &CatalogImport) -> Result<(), StorageError> {
+        self.replace_catalog_with_fingerprint(catalog, None)
+    }
+
+    pub(crate) fn replace_catalog_with_fingerprint(
+        &mut self,
+        catalog: &CatalogImport,
+        fingerprint: Option<&str>,
+    ) -> Result<(), StorageError> {
         let (_writer, transaction) = self.begin_write()?;
         transaction.execute("DELETE FROM catalog_cards", [])?;
+        transaction.execute("DELETE FROM catalog_refresh_state", [])?;
+        if let Some(fingerprint) = fingerprint {
+            transaction.execute(
+                "INSERT INTO catalog_refresh_state (singleton, fingerprint, rematch_pending) VALUES (1, ?1, 1)",
+                [fingerprint],
+            )?;
+        }
 
         {
             let mut card_statement = transaction.prepare(
                 "INSERT INTO catalog_cards
                  (position, uuid, name, set_code, collector_number, rarity, mana_value,
                   language, mana_cost, power, toughness, type_line, rules_text, scryfall_id,
-                  has_back_face, cardmarket_id, edhrec_saltiness, edhrec_rank)
+                  has_back_face, cardmarket_id, edhrec_saltiness, edhrec_rank, loyalty, subtypes,
+                  legal_formats)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                         ?15, ?16, ?17, ?18)",
+                         ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
             )?;
             let mut facet_statement = transaction.prepare(
                 "INSERT INTO catalog_facets (card_uuid, kind, position, value)
@@ -560,6 +588,9 @@ impl CollectionStore {
                     card.cardmarket_id,
                     card.edhrec_saltiness,
                     card.edhrec_rank,
+                    card.loyalty,
+                    card.subtypes.as_ref().map(|values| values.join("\x1f")),
+                    card.legal_formats,
                 ])?;
                 insert_facets(&mut facet_statement, &card.uuid, "color", &card.colors)?;
                 insert_facets(
@@ -585,13 +616,56 @@ impl CollectionStore {
         Ok(catalog)
     }
 
+    pub fn load_catalog_matching_candidates(&self) -> Result<Vec<CardCandidate>, StorageError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let mut finishes = HashMap::<String, Vec<String>>::new();
+        {
+            let mut statement = transaction.prepare(
+                "SELECT card_uuid, value FROM catalog_facets
+                 WHERE kind = 'finish' ORDER BY card_uuid, position",
+            )?;
+            let mut rows = statement.query([])?;
+            while let Some(row) = rows.next()? {
+                finishes.entry(row.get(0)?).or_default().push(row.get(1)?);
+            }
+        }
+        let candidates = {
+            let mut statement = transaction.prepare(
+                "SELECT uuid, name, set_code, collector_number, language
+                 FROM catalog_cards ORDER BY position",
+            )?;
+            statement
+                .query_map([], |row| {
+                    let uuid = row.get::<_, String>(0)?;
+                    let finishes = finishes.remove(&uuid).unwrap_or_default();
+                    Ok(CardCandidate::new_with_details(
+                        &uuid,
+                        &row.get::<_, String>(1)?,
+                        &row.get::<_, String>(2)?,
+                        &row.get::<_, String>(3)?,
+                        Some(&row.get::<_, String>(4)?),
+                        &finishes,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        if !finishes.is_empty() {
+            return Err(StorageError::InvalidData(
+                "catalog facets reference missing cards".into(),
+            ));
+        }
+        transaction.commit()?;
+        Ok(candidates)
+    }
+
     fn load_catalog_scoped(&self, selected_only: bool) -> Result<Vec<CatalogCard>, StorageError> {
         let mut facets = self.load_catalog_facets(selected_only)?;
         let scope = reference_scope("uuid", selected_only);
         let mut statement = self.connection.prepare(&format!(
             "SELECT uuid, name, set_code, collector_number, rarity, mana_value, language,
                     mana_cost, power, toughness, type_line, rules_text, scryfall_id,
-                    has_back_face, cardmarket_id, edhrec_saltiness, edhrec_rank
+                    has_back_face, cardmarket_id, edhrec_saltiness, edhrec_rank,
+                    loyalty, subtypes, legal_formats
              FROM catalog_cards {scope} ORDER BY position",
         ))?;
         let mut rows = statement.query([])?;
@@ -620,6 +694,15 @@ impl CollectionStore {
                 mana_cost: row.get(7)?,
                 power: row.get(8)?,
                 toughness: row.get(9)?,
+                loyalty: row.get(17)?,
+                subtypes: row.get::<_, Option<String>>(18)?.map(|value| {
+                    value
+                        .split('\x1f')
+                        .filter(|subtype| !subtype.is_empty())
+                        .map(str::to_owned)
+                        .collect()
+                }),
+                legal_formats: row.get(19)?,
                 type_line: row.get(10)?,
                 rules_text: row.get(11)?,
             });
@@ -630,6 +713,42 @@ impl CollectionStore {
             ));
         }
         Ok(cards)
+    }
+
+    pub fn catalog_has_legal_formats(&self) -> Result<bool, StorageError> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS (SELECT 1 FROM catalog_cards WHERE legal_formats IS NOT NULL)",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub(crate) fn catalog_rematch_status(
+        &self,
+        fingerprint: &str,
+    ) -> Result<Option<bool>, StorageError> {
+        Ok(self.connection.query_row(
+            "SELECT rematch_pending FROM catalog_refresh_state WHERE singleton = 1 AND fingerprint = ?1",
+            [fingerprint],
+            |row| row.get(0),
+        ).optional()?)
+    }
+
+    pub fn mark_catalog_rematched(&mut self, fingerprint: &str) -> Result<(), StorageError> {
+        let _writer = self.lock_writer()?;
+        self.connection.execute(
+            "UPDATE catalog_refresh_state SET rematch_pending = 0 WHERE singleton = 1 AND fingerprint = ?1",
+            [fingerprint],
+        )?;
+        Ok(())
+    }
+
+    pub fn catalog_has_pending_rematch(&self) -> Result<bool, StorageError> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS (SELECT 1 FROM catalog_refresh_state WHERE rematch_pending = 1)",
+            [],
+            |row| row.get(0),
+        )?)
     }
 
     pub fn card_edhrec_stats(&self, uuid: &str) -> Result<CardEdhrecStats, StorageError> {
@@ -729,9 +848,9 @@ impl CollectionStore {
     }
 
     pub fn load_set_release_dates(&self) -> Result<BTreeMap<String, String>, StorageError> {
-        let mut statement = self.connection.prepare_cached(
-            "SELECT set_code, release_date FROM reference_set_release_dates",
-        )?;
+        let mut statement = self
+            .connection
+            .prepare_cached("SELECT set_code, release_date FROM reference_set_release_dates")?;
         let dates = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         dates.collect::<Result<_, _>>().map_err(StorageError::from)
     }

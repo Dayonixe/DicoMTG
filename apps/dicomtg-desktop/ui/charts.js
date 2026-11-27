@@ -176,7 +176,7 @@ export function overviewDistribution(items, kind) {
     let labels;
     if (kind === "colors") labels = item.colors.length ? item.colors : ["C"];
     else if (kind === "types") {
-      labels = item.types.filter((type) => type.toLowerCase() !== "kindred");
+      labels = item.types;
     } else if (kind === "manaValues" && item.manaValue !== null) {
       labels = [String(item.manaValue)];
     } else labels = [];
@@ -185,19 +185,30 @@ export function overviewDistribution(items, kind) {
     }
   }
 
+  return overviewDistributionFromTotals([...quantities].map(([label, quantity]) => ({ label, quantity })), kind);
+}
+
+export function overviewDistributionFromTotals(entries, kind) {
   const colorOrder = ["W", "U", "B", "R", "G", "C"];
-  return [...quantities.entries()]
-    .map(([label, quantity]) => ({ label, quantity }))
-    .sort(
-      (left, right) =>
-        right.quantity - left.quantity ||
-        (kind === "colors"
-          ? colorOrder.indexOf(left.label) - colorOrder.indexOf(right.label)
-          : left.label.localeCompare(right.label, "fr", {
-              numeric: true,
-              sensitivity: "base",
-            })),
-    );
+  let totals = kind === "types" ? entries.filter(({ label }) => label.toLowerCase() !== "kindred") : [...entries];
+  if (kind === "manaValues") {
+    const byValue = new Map();
+    for (const { label, quantity } of totals) {
+      const value = String(Number(label));
+      byValue.set(value, (byValue.get(value) ?? 0) + quantity);
+    }
+    totals = [...byValue].map(([label, quantity]) => ({ label, quantity }));
+  }
+  return totals.sort(
+    (left, right) =>
+      right.quantity - left.quantity ||
+      (kind === "colors"
+        ? colorOrder.indexOf(left.label) - colorOrder.indexOf(right.label)
+        : left.label.localeCompare(right.label, "fr", {
+            numeric: true,
+            sensitivity: "base",
+          })),
+  );
 }
 
 export function filterFacetItems(items, kind, selected, manaValues = []) {

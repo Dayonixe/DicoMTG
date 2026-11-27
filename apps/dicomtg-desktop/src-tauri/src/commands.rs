@@ -9,19 +9,24 @@ use std::{
 };
 
 use dicomtg_core::{
-    CardImageCacheStats, CardImageFace, CardImageSize, CardLegalities, CollectionItemStatus,
-    CollectionListItem, CollectionQuery, CollectionSnapshot, CollectionStore, DistributionEntry,
+    CardImageCache, CardImageCacheStats, CardImageFace, CardImageSize, CardLegalities,
+    CollectionItemStatus, CollectionListItem, CollectionQuery, CollectionSnapshot,
+    CollectionStore, DistributionEntry,
     ImportError, MatchResult, RelatedToken, RowIssueReason, analyze_collection,
-    analyze_collection_by_type, build_collection, card_image_cache_stats, clear_card_image_cache,
+    analyze_collection_by_type, build_collection,
     download_collection_csv as fetch_collection_csv, find_card_french_text,
     find_english_related_tokens,
     google_drive_source_url, import_collection_csv as parse_collection_csv,
     initialize_set_release_dates, is_valid_iso_date,
-    load_card_image, load_card_localization as fetch_card_localization, most_expensive_card,
+    load_card_localization as fetch_card_localization, most_expensive_card,
     query_collection, rematch_collection, update_catalog_from_mtgjson,
     update_prices_from_cardmarket,
 };
 use serde::{Deserialize, Serialize};
+use dicomtg_core::{
+    Deck, DeckCardInfo, DeckCardLegality, DeckLegalityTarget, DeckWorkspace, SavedDeck, import_decks_csv,
+    load_deck_legalities,
+};
 use tauri::{
     State,
     ipc::{Channel, Response},
@@ -32,8 +37,7 @@ pub struct AppState {
     store: Arc<Mutex<CollectionStore>>,
     collection_writer: Arc<Mutex<CollectionStore>>,
     update_directory: PathBuf,
-    image_directory: PathBuf,
-    image_cache_lock: Mutex<()>,
+    image_cache: Arc<CardImageCache>,
     card_localizations: Mutex<HashMap<String, CardLocalizationDto>>,
     reference_update_running: Arc<AtomicBool>,
 }
@@ -50,8 +54,7 @@ impl AppState {
             store: Arc::new(Mutex::new(store)),
             collection_writer: Arc::new(Mutex::new(collection_writer)),
             update_directory,
-            image_directory,
-            image_cache_lock: Mutex::new(()),
+            image_cache: Arc::new(CardImageCache::new(image_directory)),
             card_localizations: Mutex::new(HashMap::new()),
             reference_update_running: Arc::new(AtomicBool::new(false)),
         }
@@ -150,6 +153,9 @@ struct CollectionItemDto {
     mana_cost: Option<String>,
     power: Option<String>,
     toughness: Option<String>,
+    loyalty: Option<String>,
+    subtypes: Option<Vec<String>>,
+    legal_formats: Option<u16>,
     type_line: Option<String>,
     rules_text: Option<String>,
     price_cents: Option<u64>,
@@ -363,6 +369,9 @@ fn collection_item_dto(item: CollectionListItem) -> CollectionItemDto {
         mana_cost: item.mana_cost().map(str::to_owned),
         power: item.power().map(str::to_owned),
         toughness: item.toughness().map(str::to_owned),
+        loyalty: item.loyalty().map(str::to_owned),
+        subtypes: item.subtypes().map(<[String]>::to_vec),
+        legal_formats: item.legal_formats(),
         type_line: item.type_line().map(str::to_owned),
         rules_text: item.rules_text().map(str::to_owned),
         price_cents: item.price_cents(),
@@ -506,7 +515,7 @@ fn build_collection_import(
         return Err("Import refusé : aucune ligne valide dans le fichier.".to_owned());
     }
 
-    let catalog = store.load_catalog().map_err(|error| error.to_string())?;
+    let candidates = store.load_catalog_matching_candidates().map_err(|error| error.to_string())?;
     let issues = report
         .issues()
         .iter()
@@ -515,10 +524,6 @@ fn build_collection_import(
             reason: import_issue_reason(issue.reason()),
         })
         .collect();
-    let candidates = catalog
-        .iter()
-        .map(|card| card.matching_candidate())
-        .collect::<Vec<_>>();
     let collection = build_collection(report, &candidates).map_err(|error| error.to_string())?;
     let unmatched_rows = collection
         .unresolved()
@@ -613,6 +618,68 @@ async fn write_collection<T: Send + 'static>(
     })
     .await
     .map_err(|error| format!("Échec de la tâche d’écriture : {error}"))?
+}
+
+async fn read_deck_data<T: Send + 'static>(
+    state: &AppState,
+    operation: impl FnOnce(&CollectionStore) -> Result<T, dicomtg_core::StorageError> + Send + 'static,
+) -> Result<T, String> {
+    let primary = Arc::clone(&state.store);
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = primary.lock().map_err(|_| "Base locale indisponible".to_owned())?
+            .open_peer().map_err(|error| error.to_string())?;
+        operation(&store).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn load_deck_workspace(state: State<'_, AppState>) -> Result<DeckWorkspace, String> {
+    read_deck_data(&state, CollectionStore::load_deck_workspace).await
+}
+
+#[tauri::command]
+pub async fn list_saved_decks(state: State<'_, AppState>) -> Result<Vec<SavedDeck>, String> {
+    read_deck_data(&state, CollectionStore::list_saved_decks).await
+}
+
+#[tauri::command]
+pub async fn search_deck_cards(
+    state: State<'_, AppState>, search: String, names: Vec<String>, commander: bool,
+) -> Result<Vec<DeckCardInfo>, String> {
+    read_deck_data(&state, move |store| store.find_deck_cards(&search, &names, commander)).await
+}
+
+#[tauri::command(async)]
+pub fn preview_deck_import(csv: String, filename: String) -> Result<Vec<Deck>, String> {
+    import_decks_csv(&csv, &filename)
+}
+
+#[tauri::command]
+pub async fn save_deck(
+    state: State<'_, AppState>, id: Option<i64>, revision: Option<i64>, deck: Deck,
+) -> Result<SavedDeck, String> {
+    let current = match (id, revision) {
+        (Some(id), Some(revision)) => Some((id, revision)),
+        (None, None) => None,
+        _ => return Err("Révision du deck manquante.".to_owned()),
+    };
+    write_collection(&state, move |store| store.save_deck(current, deck).map_err(|error| error.to_string())).await
+}
+
+#[tauri::command]
+pub async fn delete_deck(state: State<'_, AppState>, id: i64, revision: i64) -> Result<(), String> {
+    write_collection(&state, move |store| store.delete_deck(id, revision).map_err(|error| error.to_string())).await
+}
+
+#[tauri::command]
+pub async fn check_deck_legalities(targets: Vec<DeckLegalityTarget>) -> Result<Vec<DeckCardLegality>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        load_deck_legalities(&targets).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -772,14 +839,18 @@ fn refresh_reference_data(
     force: bool,
     on_catalog_ready: impl FnOnce(),
 ) -> Result<ReferenceUpdateDto, String> {
-    if !reference_update_due(
+    let update_due = reference_update_due(
         store
             .last_reference_update_date()
             .map_err(|error| error.to_string())?
             .as_deref(),
         local_date,
         force,
-    ) {
+    );
+    if !update_due
+        && store.catalog_has_legal_formats().map_err(|error| error.to_string())?
+        && !store.catalog_has_pending_rematch().map_err(|error| error.to_string())?
+    {
         let set_dates_initialized =
             initialize_set_release_dates(store, update_directory).unwrap_or(false);
         let (catalog_cards, reference_prices) = store
@@ -799,32 +870,8 @@ fn refresh_reference_data(
     on_catalog_ready();
     let prices = update_prices_from_cardmarket(store, update_directory)
         .map_err(|error| format!("Échec de l’actualisation des prix : {error}"))?;
-    let candidates = store
-        .load_catalog()
-        .map_err(|error| error.to_string())?
-        .iter()
-        .map(|card| card.matching_candidate())
-        .collect::<Vec<_>>();
-    let collection_ids = store
-        .collections()
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .map(|collection| collection.id())
-        .collect::<Vec<_>>();
-    for collection_id in collection_ids {
-        let Some(collection) = store
-            .load_collection_if_present(collection_id)
-            .map_err(|error| error.to_string())?
-        else {
-            continue;
-        };
-        let replacement = rematch_collection(collection.clone(), &candidates)
-            .map_err(|error| format!("Échec du réappariement : {error}"))?;
-        if replacement != collection {
-            store
-                .replace_collection_if_unchanged(collection_id, &collection, &replacement)
-                .map_err(|error| error.to_string())?;
-        }
+    if let Some(fingerprint) = catalog.pending_rematch() {
+        rematch_updated_catalog(store, fingerprint)?;
     }
     store
         .set_last_reference_update_date(local_date)
@@ -837,6 +884,36 @@ fn refresh_reference_data(
         update_date: local_date.to_owned(),
         set_dates_initialized: false,
     })
+}
+
+fn rematch_updated_catalog(store: &mut CollectionStore, fingerprint: &str) -> Result<(), String> {
+    let collections = store.collections().map_err(|error| error.to_string())?;
+    if !collections.is_empty() {
+        let candidates = store.load_catalog_matching_candidates().map_err(|error| error.to_string())?;
+        let mut all_current = true;
+        for collection in collections {
+            let id = collection.id();
+            let Some(snapshot) = store
+                .load_collection_if_present(id)
+                .map_err(|error| error.to_string())?
+            else {
+                continue;
+            };
+            let replacement = rematch_collection(snapshot.clone(), &candidates)
+                .map_err(|error| format!("Échec du réappariement : {error}"))?;
+            if replacement != snapshot {
+                all_current &= store
+                    .replace_collection_if_unchanged(id, &snapshot, &replacement)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        if !all_current {
+            return Ok(());
+        }
+    }
+    store
+        .mark_catalog_rematched(fingerprint)
+        .map_err(|error| error.to_string())
 }
 
 struct ReferenceUpdateGuard(Arc<AtomicBool>);
@@ -855,8 +932,8 @@ fn valid_local_date(value: &str) -> bool {
     is_valid_iso_date(value)
 }
 
-#[tauri::command(async)]
-pub fn load_card_image_bytes(
+#[tauri::command]
+pub async fn load_card_image_bytes(
     state: State<'_, AppState>,
     scryfall_id: Option<String>,
     set_code: String,
@@ -874,20 +951,15 @@ pub fn load_card_image_bytes(
         "back" => CardImageFace::Back,
         _ => return Err("Face d’image non prise en charge".to_owned()),
     };
-    let _cache_guard = state
-        .image_cache_lock
-        .lock()
-        .map_err(|_| "local image cache lock is poisoned".to_owned())?;
-    let bytes = load_card_image(
-        &state.image_directory,
-        scryfall_id.as_deref(),
-        &set_code,
-        &collector_number,
-        size,
-        face,
-    )
-    .map_err(|error| error.to_string())?;
-    Ok(Response::new(bytes))
+    let cache = Arc::clone(&state.image_cache);
+    tauri::async_runtime::spawn_blocking(move || {
+        cache
+            .load(scryfall_id.as_deref(), &set_code, &collector_number, size, face)
+            .map(Response::new)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[derive(Serialize)]
@@ -973,22 +1045,14 @@ pub fn load_card_related_tokens(
 
 #[tauri::command(async)]
 pub fn load_image_cache_stats(state: State<'_, AppState>) -> Result<ImageCacheDto, String> {
-    let _cache_guard = state
-        .image_cache_lock
-        .lock()
-        .map_err(|_| "local image cache lock is poisoned".to_owned())?;
-    card_image_cache_stats(&state.image_directory)
+    state.image_cache.stats()
         .map(image_cache_dto)
         .map_err(|error| error.to_string())
 }
 
 #[tauri::command(async)]
 pub fn clear_image_cache(state: State<'_, AppState>) -> Result<ImageCacheDto, String> {
-    let _cache_guard = state
-        .image_cache_lock
-        .lock()
-        .map_err(|_| "local image cache lock is poisoned".to_owned())?;
-    clear_card_image_cache(&state.image_directory)
+    state.image_cache.clear()
         .map(image_cache_dto)
         .map_err(|error| error.to_string())
 }
