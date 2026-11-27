@@ -35,6 +35,10 @@ import {
   groupCardVariants,
 } from "./card-search.js";
 import { cardSubtypes, filterCollectionCards } from "./card-filters.js";
+import {
+  CARD_LANGUAGES, cardLanguage, compareLocalized, displayedCardName, displayedSetName,
+  setCardLanguage, setGameLocalizations,
+} from "./game-localization.js";
 import { PAGE_IDS, pageFromHash } from "./navigation.js";
 import { cardsTableCsv } from "./csv-export.js";
 import {
@@ -49,6 +53,9 @@ import { calculateBasicLands, DECK_COLOR_CODES } from "./deck-builder.js";
 import { createDeckWorkspace } from "./deck-workspace.js";
 import { deckCardKey } from "./deck-assistant.js";
 import { setupAppUpdater } from "./app-updater.js";
+import {
+  countText, initializeInterfaceLanguage, refreshInterfaceLanguage, setUiAttribute, setUiText, t,
+} from "./interface-language.js";
 
 const form = document.querySelector("#filters");
 const collectionSearch = document.querySelector("#search");
@@ -227,7 +234,9 @@ const PREVIEW_FOCUS_DELAY_MS = 150;
 let cardPreviewTimer;
 let cardPreviewTarget;
 let cardDetailRequestId = 0;
-const alternateFrenchTextRequests = new Map();
+let openedCardDetail;
+let cardDetailLanguageDirty = false;
+const alternatePrintedTextRequests = new Map();
 const englishRelatedTokenRequests = new Map();
 let refreshCardDetailEdhrecStats;
 let searchableCards = [];
@@ -260,6 +269,9 @@ const navigationLinks = document.querySelectorAll("[data-nav-page]");
 
 const tauriCore = window.__TAURI__?.core;
 const invoke = tauriCore?.invoke;
+const cardLanguageSelect = document.querySelector("#card-language");
+const cardLanguageStatus = document.querySelector("#card-language-status");
+setCardLanguage(localStorage.getItem("dicomtg-card-language"));
 const deckWorkspace = createDeckWorkspace(invoke, {
   createColorSymbols, formatCount, showCardDetail, showCardImage, clearCardImage, prefillLandBuilder,
 });
@@ -289,6 +301,9 @@ function routeFromLocation() {
 }
 
 function renderActiveCollectionPage(page) {
+  if (page === "card" && openedCardDetail && cardDetailLanguageDirty) {
+    showCardDetail(openedCardDetail, false);
+  }
   if (page === "overview" && overviewDashboard?.dirty) renderOverviewAnalysis();
   const facetAnalysis = facetAnalyses[page];
   if (facetAnalysis?.entries) {
@@ -323,14 +338,15 @@ function renderCollectionFilterResults() {
   collectionItems = filterCollectionCards(searchableCards, appliedCardFilters);
   collectionRowsDirty = true;
   const count = collectionItems.length;
-  document.querySelector("#result-summary").textContent = `${formatCount(count)} résultat${count > 1 ? "s" : ""}`;
+  setUiText(document.querySelector("#result-summary"), () =>
+    countText(count, "{count} résultat", "{count} résultats", formatCount(count)));
   const waitingForCatalog = Boolean((appliedCardFilters?.format || appliedCardFilters?.loyalty)
     && searchableCards.some((card) => card.uuid && card.rarity !== "token")
     && !searchableCards.some((card) => card.legalFormats != null));
   cardFiltersCatalogStatus.hidden = !waitingForCatalog;
-  cardFiltersCatalogStatus.textContent = waitingForCatalog
+  setUiText(cardFiltersCatalogStatus, waitingForCatalog
     ? "La loyauté et la légalité par format sont disponibles après l’actualisation du catalogue dans Données."
-    : "";
+    : "");
 }
 
 function replaceSuggestions(list, values) {
@@ -367,8 +383,8 @@ function refreshCardFilterOptions() {
     for (const subtype of cardSubtypes(card)) subtypes.add(subtype);
   }
   if (selectedType) types.add(selectedType);
-  cardTypeFilter.replaceChildren(new Option("Tous les types", ""), ...[...types]
-    .sort((a, b) => distributionLabel("types", a).localeCompare(distributionLabel("types", b), "fr"))
+  cardTypeFilter.replaceChildren(new Option(t("Tous les types"), ""), ...[...types]
+    .sort((a, b) => compareLocalized(distributionLabel("types", a), distributionLabel("types", b)))
     .map((type) => new Option(distributionLabel("types", type), type)));
   cardTypeFilter.value = selectedType;
   replaceSuggestions(cardSubtypeSuggestions, [...subtypes].sort((a, b) => a.localeCompare(b, "fr")));
@@ -392,7 +408,7 @@ function updateSearchableCards(cards) {
 
 function setLoading(loading) {
   submitButton.disabled = loading;
-  submitButton.textContent = loading ? "Chargement…" : "Appliquer";
+  setUiText(submitButton, loading ? "Chargement…" : "Appliquer");
   setTableExportAvailable(rows, !loading && virtualTables.has(rows));
 }
 
@@ -402,17 +418,17 @@ function setImportLoading(loading, reimport = false) {
   collectionUrlInput.disabled = loading;
   collectionNameInput.disabled = loading;
   cancelCollectionUpdateButton.disabled = loading;
-  importButton.textContent = loading
+  setUiText(importButton, loading
     ? (reimport ? "Import en cours…" : "Enregistrement…")
     : collectionUpdateTarget
       ? "Mettre à jour"
-      : "Ajouter";
+      : "Ajouter");
 }
 
 function showError(message) {
-  errorRegion.textContent = message;
+  setUiText(errorRegion, message);
   errorRegion.hidden = false;
-  statusRegion.textContent = "Échec du chargement";
+  setUiText(statusRegion, "Échec du chargement");
 }
 
 function clearError() {
@@ -421,12 +437,12 @@ function clearError() {
 }
 
 function showImportError(message) {
-  importError.textContent = message;
+  setUiText(importError, message);
   importError.hidden = false;
   fileInput.setAttribute("aria-invalid", "true");
   collectionUrlInput.setAttribute("aria-invalid", "true");
   collectionNameInput.setAttribute("aria-invalid", "true");
-  statusRegion.textContent = "Échec de l’import";
+  setUiText(statusRegion, "Échec de l’import");
 }
 
 function clearImportError() {
@@ -439,13 +455,13 @@ function clearImportError() {
 
 function setReferenceLoading(loading) {
   referenceButton.disabled = loading;
-  referenceButton.textContent = loading ? "Actualisation en cours…" : "Actualiser";
+  setUiText(referenceButton, loading ? "Actualisation en cours…" : "Actualiser");
 }
 
 function showReferenceError(message) {
-  referenceError.textContent = message;
+  setUiText(referenceError, message);
   referenceError.hidden = false;
-  statusRegion.textContent = "Échec de l’actualisation";
+  setUiText(statusRegion, "Échec de l’actualisation");
 }
 
 function clearReferenceError() {
@@ -454,7 +470,10 @@ function clearReferenceError() {
 }
 
 function renderImageCacheStats(stats) {
-  imageCacheUsage.textContent = `${formatBytes(stats.totalBytes)} sur ${formatBytes(stats.capacityBytes)} · ${formatCount(stats.imageCount)} image${stats.imageCount > 1 ? "s" : ""}`;
+  setUiText(imageCacheUsage, "{used} sur {capacity} · {count} images", {
+    used: () => formatBytes(stats.totalBytes), capacity: () => formatBytes(stats.capacityBytes),
+    count: () => formatCount(stats.imageCount),
+  });
   imageCacheProgress.max = stats.capacityBytes || 1;
   imageCacheProgress.value = Math.min(stats.totalBytes, stats.capacityBytes);
   clearImageCacheButton.disabled = stats.imageCount === 0;
@@ -462,7 +481,7 @@ function renderImageCacheStats(stats) {
 
 async function loadImageCacheStats() {
   imageCacheError.hidden = true;
-  imageCacheUsage.textContent = "Calcul de l’occupation…";
+  setUiText(imageCacheUsage, "Calcul de l’occupation…");
   clearImageCacheButton.disabled = true;
   try {
     if (!invoke) throw new Error("L’interface doit être ouverte depuis l’application DicoMTG.");
@@ -470,7 +489,7 @@ async function loadImageCacheStats() {
   } catch (error) {
     imageCacheError.textContent = String(error);
     imageCacheError.hidden = false;
-    imageCacheUsage.textContent = "Occupation indisponible";
+    setUiText(imageCacheUsage, "Occupation indisponible");
   }
 }
 
@@ -497,12 +516,12 @@ function renderMetrics(metrics) {
   document.querySelector("#metric-unpriced").textContent = formatCount(
     metrics.unpricedPrintings,
   );
-  catalogStatus.textContent = metrics.catalogCards
-    ? `${formatCount(metrics.catalogCards)} cartes`
-    : "Non installé";
-  priceStatus.textContent = metrics.referencePrices
-    ? `${formatCount(metrics.referencePrices)} prix`
-    : "Non installé";
+  setUiText(catalogStatus, metrics.catalogCards
+    ? () => countText(metrics.catalogCards, "{count} carte", "{count} cartes", formatCount(metrics.catalogCards))
+    : "Non installé");
+  setUiText(priceStatus, metrics.referencePrices ? "{count} prix" : "Non installé", {
+    count: () => formatCount(metrics.referencePrices),
+  });
 }
 
 function appendCell(row, value, className) {
@@ -517,14 +536,14 @@ function appendDetailFact(facts, label, value) {
   const fact = document.createElement("div");
   const term = document.createElement("dt");
   const description = document.createElement("dd");
-  term.textContent = label;
+  setUiText(term, label);
   if (value instanceof Node) description.append(value);
   else description.textContent = value;
   fact.append(term, description);
   facts.append(fact);
 }
 
-function createManaSymbolText(value, fallback = "Indisponible") {
+function createManaSymbolText(value, fallback = t("Indisponible")) {
   const content = String(value ?? "").trim() || fallback;
   const container = document.createElement("span");
   container.className = "mana-symbol-text";
@@ -579,12 +598,14 @@ async function showCardImage(item, image, state, size = "normal", face = "front"
   let imageUrl = cardImageUrl(item, size, face);
 
   if (!imageUrl) {
-    state.textContent = "Illustration indisponible pour cette carte non appariée.";
+    setUiText(state, "Illustration indisponible pour cette carte non appariée.");
     return;
   }
 
-  state.textContent = "Chargement de l’illustration…";
-  image.alt = `${face === "back" ? "Verso" : "Recto"} de la carte Magic : ${item.name}`;
+  setUiText(state, "Chargement de l’illustration…");
+  setUiAttribute(image, "alt", "{face} de la carte Magic : {name}", {
+    face: () => t(face === "back" ? "Verso" : "Recto"), name: () => displayedCardName(item),
+  });
   if (invoke) {
     try {
       const bytes = await invoke("load_card_image_bytes", {
@@ -611,7 +632,7 @@ async function showCardImage(item, image, state, size = "normal", face = "front"
   image.onerror = () => {
     if (!isCurrent()) return;
     image.hidden = true;
-    state.textContent = "Illustration indisponible hors ligne ou pour cette impression.";
+    setUiText(state, "Illustration indisponible hors ligne ou pour cette impression.");
     state.hidden = false;
   };
   image.src = imageUrl;
@@ -636,8 +657,8 @@ function positionCardPreview(target) {
 
 function openCardPreview(item, target) {
   cardPreviewTarget = target;
-  cardPreviewName.textContent = item.name;
-  cardPreviewMeta.textContent = `${item.setCode} · n° ${item.collectorNumber}`;
+  cardPreviewName.textContent = displayedCardName(item);
+  cardPreviewMeta.textContent = `${item.setCode} · ${t("n° {number}", { number: item.collectorNumber })}`;
   cardPreview.hidden = false;
   target.setAttribute("aria-describedby", "card-preview");
   positionCardPreview(target);
@@ -694,7 +715,7 @@ function createCardImageFrame() {
   image.hidden = true;
   const imageState = document.createElement("p");
   imageState.setAttribute("aria-live", "polite");
-  imageState.textContent = "Illustration en attente.";
+  setUiText(imageState, "Illustration en attente.");
   frame.append(image, imageState);
   return { frame, image, imageState };
 }
@@ -714,8 +735,8 @@ function renderCardPrinting(item, gallery) {
     flip.innerHTML = '<span aria-hidden="true">↻</span>';
     const updateFlip = () => {
       const label = face === "front" ? "Afficher le verso" : "Afficher le recto";
-      flip.setAttribute("aria-label", label);
-      flip.title = label;
+      setUiAttribute(flip, "aria-label", label);
+      setUiAttribute(flip, "title", label);
     };
     updateFlip();
     flip.addEventListener("click", () => {
@@ -729,10 +750,10 @@ function renderCardPrinting(item, gallery) {
   const caption = document.createElement("figcaption");
   const setName = document.createElement("strong");
   setName.className = "card-printing-set";
-  setName.textContent = item.setCode;
+  setName.textContent = displayedSetName(item.setCode);
   const number = document.createElement("span");
   number.className = "card-printing-number";
-  number.textContent = `n° ${item.collectorNumber}`;
+  setUiText(number, "n° {number}", { number: item.collectorNumber });
   caption.append(setName, number);
   visual.append(frame, caption);
 
@@ -745,7 +766,7 @@ function renderCardPrinting(item, gallery) {
     const price = document.createElement("div");
     const term = document.createElement("dt");
     const amount = document.createElement("dd");
-    term.textContent = label;
+    setUiText(term, label);
     amount.textContent = formatCurrency(value);
     price.append(term, amount);
     prices.append(price);
@@ -770,7 +791,7 @@ function appendRelatedTokens(section, tokens, seenIds) {
     const caption = document.createElement("figcaption");
     const name = document.createElement("strong");
     name.className = "card-printing-set";
-    name.textContent = token.name;
+    name.textContent = displayedCardName(token);
     const type = document.createElement("span");
     type.className = "card-printing-number";
     type.textContent = token.typeLine;
@@ -793,25 +814,26 @@ function renderCardLegalities(target, legalities) {
   };
   for (const element of target.querySelectorAll("[data-format]")) {
     const status = legalities?.[element.dataset.format];
-    element.textContent = labels[status] ?? "Indisponible";
+    setUiText(element, labels[status] ?? "Indisponible");
     element.dataset.status = status ?? "";
   }
 }
 
-function loadAlternateFrenchText(oracleId) {
-  const cached = alternateFrenchTextRequests.get(oracleId);
+function loadAlternatePrintedText(oracleId, language) {
+  const key = `${oracleId}:${language}`;
+  const cached = alternatePrintedTextRequests.get(key);
   if (cached) return cached;
 
-  if (alternateFrenchTextRequests.size >= 128) {
-    alternateFrenchTextRequests.delete(alternateFrenchTextRequests.keys().next().value);
+  if (alternatePrintedTextRequests.size >= 128) {
+    alternatePrintedTextRequests.delete(alternatePrintedTextRequests.keys().next().value);
   }
-  const request = invoke("load_card_french_text", { oracleId }).catch(() => {
-    if (alternateFrenchTextRequests.get(oracleId) === request) {
-      alternateFrenchTextRequests.delete(oracleId);
+  const request = invoke("load_card_printed_text", { oracleId, language }).catch(() => {
+    if (alternatePrintedTextRequests.get(key) === request) {
+      alternatePrintedTextRequests.delete(key);
     }
     return null;
   });
-  alternateFrenchTextRequests.set(oracleId, request);
+  alternatePrintedTextRequests.set(key, request);
   return request;
 }
 
@@ -836,8 +858,9 @@ function loadEnglishRelatedTokens({ setCode, collectorNumber, oracleId }) {
 
 async function localizeCardDetail({ printings, rules, legalities, relatedTokens }, requestId) {
   if (!invoke) return;
+  const language = cardLanguage();
   let alternateLookup;
-  let hasFrenchText = false;
+  let hasLocalizedText = false;
   let hasDisplayedRules = false;
   let hasLegalities = false;
   let englishTokenCandidate;
@@ -848,9 +871,10 @@ async function localizeCardDetail({ printings, rules, legalities, relatedTokens 
       const localization = await invoke("load_card_localization", {
         setCode: item.setCode,
         collectorNumber: item.collectorNumber,
+        language,
       });
       if (requestId !== cardDetailRequestId) return;
-      setName.textContent = localization.setName;
+      setName.textContent = displayedSetName(item.setCode, localization.setName);
       if (localization.relatedTokens?.length) {
         appendRelatedTokens(relatedTokens, localization.relatedTokens, seenTokenIds);
       } else if (!englishTokenCandidate && localization.needsEnglishTokenLookup) {
@@ -864,17 +888,17 @@ async function localizeCardDetail({ printings, rules, legalities, relatedTokens 
         renderCardLegalities(legalities, localization.legalities);
         hasLegalities = true;
       }
-      if (!hasFrenchText && localization.frenchText) {
-        setManaSymbolText(rules, localization.frenchText);
-        hasFrenchText = true;
+      if (!hasLocalizedText && localization.localizedText) {
+        setManaSymbolText(rules, localization.localizedText);
+        hasLocalizedText = true;
         hasDisplayedRules = true;
       } else if (!hasDisplayedRules && localization.fallbackText) {
         setManaSymbolText(rules, localization.fallbackText);
         hasDisplayedRules = true;
       }
-      if (!hasFrenchText && !alternateLookup && localization.oracleId) {
-        alternateLookup = loadAlternateFrenchText(localization.oracleId).then((text) => {
-          if (text && !hasFrenchText && requestId === cardDetailRequestId) {
+      if (language !== "en" && !hasLocalizedText && !alternateLookup && localization.oracleId) {
+        alternateLookup = loadAlternatePrintedText(localization.oracleId, language).then((text) => {
+          if (text && !hasLocalizedText && requestId === cardDetailRequestId) {
             setManaSymbolText(rules, text);
             hasDisplayedRules = true;
           }
@@ -918,17 +942,17 @@ function renderCardEdhrecStats(stats, block) {
   renderEdhrecGauge(
     block.querySelector("[data-salt-gauge]"),
     salt == null ? null : salt / 4,
-    salt?.toLocaleString("fr-FR", { maximumFractionDigits: 2 }) ?? "Indisponible",
+    salt?.toLocaleString(cardLanguage(), { maximumFractionDigits: 2 }) ?? t("Indisponible"),
     true,
   );
   renderEdhrecGauge(
     block.querySelector("[data-rank-gauge]"),
     ratio,
-    ratio?.toLocaleString("fr-FR", { minimumFractionDigits: 3, maximumFractionDigits: 3 })
-      ?? "Indisponible",
+    ratio?.toLocaleString(cardLanguage(), { minimumFractionDigits: 3, maximumFractionDigits: 3 })
+      ?? t("Indisponible"),
   );
   block.querySelector("[data-rank-position]").textContent =
-    stats?.rank == null ? "" : `n° ${formatCount(stats.rank)}`;
+    stats?.rank == null ? "" : t("n° {number}", { number: formatCount(stats.rank) });
 }
 
 async function loadCardEdhrecStats(detail, requestId) {
@@ -949,12 +973,12 @@ function renderCardDetailVariant({ kind, cards }, showHeading) {
   const block = document.importNode(cardDetailTemplate.content.firstElementChild, true);
   const representative = cards.find((card) => card.uuid) ?? cards[0];
   if (showHeading) {
-    let title = kind === "unresolved" ? "Impressions à identifier" : "Carte";
+    let title = t(kind === "unresolved" ? "Impressions à identifier" : "Carte");
     if (kind === "token") {
       const stats = representative.power != null && representative.toughness != null
         ? ` ${representative.power}/${representative.toughness}`
         : "";
-      title = [`Jeton${stats}`, ...(representative.keywords ?? [])].join(" · ");
+      title = [t("Jeton") + stats, ...(representative.keywords ?? []).map((keyword) => distributionLabel("keywords", keyword))].join(" · ");
     }
     const heading = block.querySelector(".card-variant-title");
     heading.textContent = title;
@@ -977,13 +1001,13 @@ function renderCardDetailVariant({ kind, cards }, showHeading) {
     ["Rareté", formatList(rarities)],
     ["Valeur de mana", formatOptionalText(representative.manaValue)],
     ["Coût de mana", createManaSymbolText(representative.manaCost)],
-    ["Couleurs", createColorSymbols(mergedValues("colors"), "Indisponible")],
+    ["Couleurs", createColorSymbols(mergedValues("colors"), t("Indisponible"))],
     [
       "Identité couleur",
-      createColorSymbols(mergedValues("colorIdentity"), "Indisponible"),
+      createColorSymbols(mergedValues("colorIdentity"), t("Indisponible")),
     ],
-    ["Types", formatList(mergedValues("types"))],
-    ["Mots-clés", formatList(mergedValues("keywords"))],
+    ["Types", formatList(mergedValues("types").map((type) => distributionLabel("types", type)))],
+    ["Mots-clés", formatList(mergedValues("keywords").map((keyword) => distributionLabel("keywords", keyword)))],
     ["Force", formatOptionalText(representative.power)],
     ["Endurance", formatOptionalText(representative.toughness)],
   ];
@@ -994,8 +1018,8 @@ function renderCardDetailVariant({ kind, cards }, showHeading) {
   const gallery = block.querySelector(".card-detail-printings");
   if (representative.catalogOnly) {
     const section = gallery.closest(".card-detail-printings-section");
-    section.querySelector("h3").textContent = "Impression du catalogue";
-    section.setAttribute("aria-label", "Impression du catalogue");
+    setUiText(section.querySelector("h3"), "Impression du catalogue");
+    setUiAttribute(section, "aria-label", "Impression du catalogue");
   }
   return {
     block,
@@ -1008,17 +1032,20 @@ function renderCardDetailVariant({ kind, cards }, showHeading) {
   };
 }
 
-function showCardDetail(item) {
+function showCardDetail(item, navigate = true) {
   hideCardPreview();
+  openedCardDetail = item;
+  cardDetailLanguageDirty = false;
   const matchingCards = item.catalogOnly
     ? searchableCards.filter((card) => card.uuid && deckCardKey(card.name) === deckCardKey(item.name))
     : findCardsByName(searchableCards, item.name);
   const cards = matchingCards.length > 0 ? matchingCards : [item];
   const representative = cards.find((card) => card.uuid) ?? cards[0];
   const requestId = ++cardDetailRequestId;
-  cardDetailSearch.value = representative.name;
+  const visibleName = displayedCardName(representative);
+  cardDetailSearch.value = visibleName;
   cardDetailSearchError.hidden = true;
-  cardDetailTitle.textContent = representative.name;
+  cardDetailTitle.textContent = visibleName;
   clearCardDetail();
 
   const variants = groupCardVariants(cards);
@@ -1031,8 +1058,10 @@ function showCardDetail(item) {
   void localizeCardVariants(details, requestId);
   cardDetailEmpty.hidden = true;
   cardDetailContent.hidden = false;
-  navigateToPage("card");
-  window.requestAnimationFrame(() => cardDetailTitle.focus());
+  if (navigate) {
+    navigateToPage("card");
+    window.requestAnimationFrame(() => cardDetailTitle.focus());
+  }
 }
 
 function renderMostExpensiveCard(item) {
@@ -1044,9 +1073,11 @@ function renderMostExpensiveCard(item) {
   }
 
   mostExpensivePrice.textContent = formatCurrency(item.priceCents);
-  const quantity = `${formatCount(item.quantity)} exemplaire${item.quantity > 1 ? "s" : ""}`;
-  const total = formatCurrency(item.priceCents * item.quantity);
-  mostExpensiveContext.textContent = `${quantity} possédé${item.quantity > 1 ? "s" : ""} · valeur totale ${total}`;
+  setUiText(mostExpensiveContext, item.quantity === 1
+    ? "{count} exemplaire possédé · valeur totale {value}"
+    : "{count} exemplaires possédés · valeur totale {value}", {
+    count: () => formatCount(item.quantity), value: () => formatCurrency(item.priceCents * item.quantity),
+  });
   mostExpensiveDetail.onclick = () => showCardDetail(item);
   mostExpensiveEmpty.hidden = true;
   mostExpensiveCard.hidden = false;
@@ -1091,8 +1122,8 @@ function initializeSortableTables() {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "sort-button";
-      button.textContent = label;
-      button.setAttribute("aria-label", `Trier par ${label}`);
+      setUiText(button, label);
+      setUiAttribute(button, "aria-label", "Trier par {label}", { label: () => t(label) });
       button.addEventListener("click", () => {
         const state = nextCardSort(sortStateFor(rowsTarget), keys[index]);
         tableSortStates.set(rowsTarget, state);
@@ -1150,7 +1181,7 @@ function renderEmptyCardRows(target, columns, message) {
   const cell = row.insertCell();
   cell.colSpan = columns;
   cell.className = "empty-state";
-  cell.textContent = message;
+  cell.textContent = t(message);
   target.replaceChildren(row);
 }
 
@@ -1242,9 +1273,10 @@ function createCardRow(item) {
   const detailButton = document.createElement("button");
   detailButton.type = "button";
   detailButton.className = "card-detail-trigger";
-  detailButton.textContent = item.name;
-  detailButton.title = item.name;
-  detailButton.setAttribute("aria-label", `Consulter la fiche de ${item.name}`);
+  const visibleName = displayedCardName(item);
+  detailButton.textContent = visibleName;
+  detailButton.title = visibleName;
+  detailButton.setAttribute("aria-label", t("Consulter la fiche de {name}", { name: visibleName }));
   detailButton.addEventListener("click", () => showCardDetail(item));
   attachCardPreview(detailButton, item);
   nameCell.append(detailButton);
@@ -1254,15 +1286,15 @@ function createCardRow(item) {
 
 function createCollectionRow(item) {
   const row = createCardRow(item);
-  appendCell(row, item.setCode);
+  appendCell(row, displayedSetName(item.setCode));
   appendCell(row, item.collectorNumber);
   appendCell(row, formatCount(item.quantity), "numeric");
   appendCell(row, finishLabel(item.finish));
-  appendCell(row, item.rarity ?? "Indisponible");
+  appendCell(row, item.rarity ? distributionLabel("rarities", item.rarity) : t("Indisponible"));
   appendCell(row, createColorSymbols(item.colors));
   appendCell(
     row,
-    item.manaValue === null ? "Indisponible" : String(item.manaValue),
+    item.manaValue === null ? t("Indisponible") : formatCount(item.manaValue),
     "numeric",
   );
   appendCell(row, formatCurrency(item.priceCents), "price");
@@ -1275,7 +1307,7 @@ function renderDistribution(kind, entries) {
     if (entries.length === 0) {
       const empty = document.createElement("li");
       empty.className = "distribution-empty";
-      empty.textContent = "Aucune donnée disponible.";
+      setUiText(empty, "Aucune donnée disponible.");
       list.append(empty);
       continue;
     }
@@ -1303,7 +1335,7 @@ function renderDistribution(kind, entries) {
 function renderChartMessage(target, message) {
   const text = document.createElement("p");
   text.className = "chart-empty";
-  text.textContent = message;
+  text.textContent = t(message);
   target.classList.remove("chart-target--tooltip");
   target.replaceChildren(text);
 }
@@ -1337,7 +1369,7 @@ function renderDonutChart(
   svg.setAttribute("role", onSelect || showTooltip ? "group" : "img");
   svg.setAttribute(
     "aria-label",
-    `${chartNames[kind]} : ${segments
+    `${t(chartNames[kind])} : ${segments
       .map((entry) => `${distributionLabel(kind, entry.label)} ${formatCount(entry.quantity)}`)
       .join(", ")}`,
   );
@@ -1399,7 +1431,7 @@ function renderDonutChart(
       segment.setAttribute("aria-pressed", String(selected));
       segment.setAttribute(
         "aria-label",
-        `${tooltipText}. ${selected ? "Retirer le filtre" : "Filtrer les cartes"}. Ctrl+clic pour une sélection multiple`,
+        `${tooltipText}. ${t(selected ? "Retirer le filtre" : "Filtrer les cartes")}. ${t("Ctrl+clic pour une sélection multiple")}`,
       );
       segment.addEventListener("click", (event) => {
         onSelect(entry.label, event.ctrlKey || event.metaKey);
@@ -1418,7 +1450,7 @@ function renderDonutChart(
   const totalValue = document.createElement("strong");
   totalValue.textContent = formatCount(total);
   const totalLabel = document.createElement("span");
-  totalLabel.textContent = "contributions";
+  setUiText(totalLabel, "contributions");
   center.append(totalValue, totalLabel);
   plot.append(svg, center);
   if (showTooltip) plot.append(tooltip);
@@ -1449,8 +1481,8 @@ function renderDonutChart(
       item.setAttribute(
         "aria-label",
         `${distributionLabel(kind, entry.label)}, ${value.textContent}. ${
-          selected ? "Retirer le filtre" : "Filtrer les cartes"
-        }. Ctrl+clic pour une sélection multiple`,
+          t(selected ? "Retirer le filtre" : "Filtrer les cartes")
+        }. ${t("Ctrl+clic pour une sélection multiple")}`,
       );
       item.addEventListener("click", (event) => {
         onSelect(entry.label, event.ctrlKey || event.metaKey);
@@ -1488,8 +1520,8 @@ function renderManaChart(
   plot.setAttribute("role", onSelect || showTooltip ? "group" : "img");
   plot.setAttribute(
     "aria-label",
-    `Courbe de mana : ${ordered
-      .map((entry) => `valeur ${entry.label}, ${formatCount(entry.quantity)}`)
+    `${t("Courbe de mana")} : ${ordered
+      .map((entry) => `${entry.label}, ${formatCount(entry.quantity)}`)
       .join(", ")}`,
   );
 
@@ -1527,9 +1559,9 @@ function renderManaChart(
       column.setAttribute("aria-pressed", String(selected));
       column.setAttribute(
         "aria-label",
-        `Valeur de mana ${entry.label}, ${formatCount(entry.quantity)}. ${
-          selected ? "Retirer le filtre" : "Filtrer les cartes"
-        }. Ctrl+clic pour une sélection multiple`,
+        `${t("Valeur de mana")} ${entry.label}, ${formatCount(entry.quantity)}. ${
+          t(selected ? "Retirer le filtre" : "Filtrer les cartes")
+        }. ${t("Ctrl+clic pour une sélection multiple")}`,
       );
       column.classList.toggle("is-selected", selected);
       column.classList.toggle("is-muted", selectedLabels.length > 0 && !selected);
@@ -1678,14 +1710,14 @@ function renderDeckBuilder() {
       segment.className = "deck-land-segment";
       segment.style.flexGrow = String(value);
       segment.style.background = chartColor("colors", color, index);
-      segment.title = `${deckColorNames[color]} : ${formatted}`;
+      segment.title = `${t(deckColorNames[color])} : ${formatted}`;
       segments.push(segment);
     }
 
     const legendItem = document.createElement("li");
     const label = document.createElement("span");
     const amount = document.createElement("strong");
-    label.append(createColorSymbols([color]), deckColorNames[color]);
+    label.append(createColorSymbols([color]), t(deckColorNames[color]));
     amount.textContent = formatted;
     legendItem.append(label, amount);
     legendItems.push(legendItem);
@@ -1696,26 +1728,22 @@ function renderDeckBuilder() {
     "aria-label",
     DECK_COLOR_CODES.map(
       (color) =>
-        `${deckColorNames[color]} ${formatCount(
+        `${t(deckColorNames[color])} ${formatCount(
           Math.round(result.recommendations[color] * 10) / 10,
         )}`,
     ).join(", "),
   );
   deckLandLegend.replaceChildren(...legendItems);
   if (result.totalCards === 0) {
-    deckLandMessage.textContent =
-      "Renseignez au moins une carte avec un coût coloré.";
+    setUiText(deckLandMessage, "Renseignez au moins une carte avec un coût coloré.");
   } else if (
     DECK_COLOR_CODES.some((color) => result.recommendations[color] < 0)
   ) {
-    deckLandMessage.textContent =
-      "Une valeur négative indique que les terrains multicolores couvrent déjà cette couleur.";
+    setUiText(deckLandMessage, "Une valeur négative indique que les terrains multicolores couvrent déjà cette couleur.");
   } else {
-    deckLandMessage.textContent = `${formatCount(
-      deckInputValue("basicSlots"),
-    )} terrains de base à répartir · ${formatCount(
-      result.totalCards,
-    )} contributions colorées.`;
+    setUiText(deckLandMessage, "{count} terrains de base à répartir · {total} contributions colorées.", {
+      count: () => formatCount(deckInputValue("basicSlots")), total: () => formatCount(result.totalCards),
+    });
   }
   deckLandStack.classList.toggle("is-empty", visibleTotal === 0);
 }
@@ -1758,9 +1786,9 @@ function renderOverviewAnalysis() {
   }
 
   resetOverviewChartFilters.hidden = !hasFilters;
-  overviewFilterSummary.textContent = hasFilters
-    ? `${formatCount(metrics.totalQuantity)} carte${metrics.totalQuantity > 1 ? "s" : ""} dans la sélection`
-    : "Cliquez sur un graphique pour filtrer toute la vue.";
+  setUiText(overviewFilterSummary, hasFilters
+    ? () => countText(metrics.totalQuantity, "{count} carte dans la sélection", "{count} cartes dans la sélection", formatCount(metrics.totalQuantity))
+    : "Cliquez sur un graphique pour filtrer toute la vue.");
   overviewDashboard.dirty = false;
 }
 
@@ -1778,7 +1806,7 @@ function renderTypeOptions(entries) {
   if (selectableEntries.length === 0) {
     const option = document.createElement("option");
     option.value = "";
-    option.textContent = "Aucun type disponible";
+    setUiText(option, "Aucun type disponible");
     typeSelect.append(option);
     typeSelect.disabled = true;
     return;
@@ -1792,7 +1820,7 @@ function renderTypeOptions(entries) {
 
 function renderAnalysisItems(items, rowsTarget, summaryTarget, emptyMessage) {
   const groupedItems = groupCardPrintings(items);
-  summaryTarget.textContent = `${formatCount(groupedItems.length)} impression${groupedItems.length > 1 ? "s" : ""}`;
+  summaryTarget.textContent = countText(groupedItems.length, "{count} impression", "{count} impressions", formatCount(groupedItems.length));
   const context = { groupedItems, emptyMessage };
   analysisContexts.set(rowsTarget, context);
   renderSortedAnalysisRows(rowsTarget, context);
@@ -1805,12 +1833,12 @@ function renderSortedAnalysisRows(target, { groupedItems, emptyMessage }) {
 
 function createAnalysisRow(item) {
   const row = createCardRow(item);
-  appendCell(row, item.setCode);
+  appendCell(row, displayedSetName(item.setCode));
   appendCell(row, formatCount(item.quantity), "numeric");
   appendCell(row, createColorSymbols(item.colors));
   appendCell(
     row,
-    item.manaValue === null ? "Indisponible" : String(item.manaValue),
+    item.manaValue === null ? t("Indisponible") : formatCount(item.manaValue),
     "numeric",
   );
   return row;
@@ -1872,11 +1900,11 @@ function renderTypeAnalysisResults() {
     filters.push(
       typeChartFilters.colors
         .map((color) => distributionLabel("colors", color))
-        .join(" ou "),
+        .join(` ${t("ou")} `),
     );
   }
   if (typeChartFilters.manaValues.length > 0) {
-    filters.push(`mana ${typeChartFilters.manaValues.join(" ou ")}`);
+    filters.push(`${t("Valeur de mana")} ${typeChartFilters.manaValues.join(` ${t("ou")} `)}`);
   }
   const items = filterTypeItems(typeAnalysis.items, typeChartFilters);
   renderTypeMetrics(items);
@@ -1886,8 +1914,8 @@ function renderTypeAnalysisResults() {
   }
   resetTypeChartFilters.hidden = filters.length === 0;
   typeAnalysisStatus.textContent = filters.length
-    ? `${formatCount(items.length)} impressions affichées, filtres ${filters.join(", ")}`
-    : `Analyse ${typeAnalysis.selectedType} chargée`;
+    ? t("{count} impressions affichées, filtres {filters}", { count: formatCount(items.length), filters: filters.join(", ") })
+    : t("Analyse {type} chargée", { type: distributionLabel("types", typeAnalysis.selectedType) });
 }
 
 function renderTypeMetrics(items) {
@@ -1903,11 +1931,11 @@ function setTypeAnalysisLoading() {
   resetTypeChartFilters.hidden = true;
   typeSelect.disabled = true;
   typeAnalysisError.hidden = true;
-  typeAnalysisStatus.textContent = "Actualisation de l’analyse par type";
+  setUiText(typeAnalysisStatus, "Actualisation de l’analyse par type");
   document.querySelector("#type-metric-quantity").textContent = "…";
   document.querySelector("#type-metric-distinct-names").textContent = "…";
   document.querySelector("#type-metric-value").textContent = "…";
-  typeResultSummary.textContent = "Chargement…";
+  setUiText(typeResultSummary, "Chargement…");
   renderChartMessage(typeChartTargets.colors, "Chargement…");
   renderChartMessage(typeChartTargets.manaValues, "Chargement…");
   virtualTables.delete(typeRows);
@@ -1923,7 +1951,7 @@ async function loadTypeAnalysis() {
     clearTypeChartFilters();
     resetTypeChartFilters.hidden = true;
     typeAnalysisError.hidden = true;
-    typeAnalysisStatus.textContent = "Aucun type disponible";
+    setUiText(typeAnalysisStatus, "Aucun type disponible");
     renderChartEmpty(typeChartTargets.colors);
     renderChartEmpty(typeChartTargets.manaValues);
     renderTypeMetrics([]);
@@ -1968,7 +1996,7 @@ function resetImportSource() {
   selectedImportFile = undefined;
   fileInput.value = "";
   collectionUrlInput.value = "";
-  collectionFileStatus.textContent = "Aucun fichier sélectionné.";
+  setUiText(collectionFileStatus, "Aucun fichier sélectionné.");
   collectionDropZone.classList.remove("is-dragging");
 }
 
@@ -1982,9 +2010,9 @@ function selectImportFile(file) {
 
 function setCollectionImportMode(collection) {
   collectionUpdateTarget = collection;
-  importTitle.textContent = collection
-    ? `Mettre à jour « ${collection.name} »`
-    : "Ajouter une collection";
+  setUiText(importTitle, collection ? "Mettre à jour « {name} »" : "Ajouter une collection", {
+    name: collection?.name,
+  });
   collectionNameInput.value = collection?.name ?? "";
   cancelCollectionUpdateButton.hidden = !collection;
   resetImportSource();
@@ -2013,7 +2041,7 @@ function renderManagedCollections() {
   if (managedCollections.length === 0) {
     const empty = document.createElement("p");
     empty.className = "managed-collections-empty";
-    empty.textContent = "Aucune collection enregistrée.";
+    setUiText(empty, "Aucune collection enregistrée.");
     managedCollectionsList.append(empty);
     return;
   }
@@ -2034,7 +2062,7 @@ function renderManagedCollections() {
     name.textContent = collection.name;
     const meta = document.createElement("span");
     meta.className = "managed-collection-meta";
-    meta.textContent = `${formatCount(collection.totalQuantity)} carte${collection.totalQuantity > 1 ? "s" : ""}`;
+    meta.textContent = countText(collection.totalQuantity, "{count} carte", "{count} cartes", formatCount(collection.totalQuantity));
     copy.append(name, meta);
     choice.append(checkbox, copy);
 
@@ -2042,10 +2070,10 @@ function renderManagedCollections() {
     actions.className = "managed-collection-actions";
     const update = document.createElement("button");
     update.type = "button";
-    update.textContent = "Mettre à jour";
+    setUiText(update, "Mettre à jour");
     const remove = document.createElement("button");
     remove.type = "button";
-    remove.textContent = "Supprimer";
+    setUiText(remove, "Supprimer");
     actions.append(update, remove);
     row.append(choice, actions);
     managedCollectionsList.append(row);
@@ -2060,7 +2088,8 @@ function renderManagedCollections() {
           selected: checkbox.checked,
         });
         collection.selected = checkbox.checked;
-        managedCollectionsStatus.textContent = `${collection.name} ${checkbox.checked ? "incluse" : "masquée"}`;
+        setUiText(managedCollectionsStatus, checkbox.checked
+          ? "Collection « {name} » incluse." : "Collection « {name} » masquée.", { name: collection.name });
         await loadDashboard(true);
       } catch (error) {
         checkbox.checked = !checkbox.checked;
@@ -2072,7 +2101,7 @@ function renderManagedCollections() {
 
     remove.addEventListener("click", async () => {
       if (importButton.disabled || !window.confirm(
-        `Supprimer définitivement « ${collection.name} » et ses cartes importées de DicoMTG ?`,
+        t("Supprimer définitivement « {name} » et ses cartes importées de DicoMTG ?", { name: collection.name }),
       )) return;
       remove.disabled = update.disabled = checkbox.disabled = true;
       clearManagedCollectionsError();
@@ -2083,7 +2112,7 @@ function renderManagedCollections() {
         if (collectionUpdateTarget?.id === collection.id) {
           setCollectionImportMode(undefined);
         }
-        managedCollectionsStatus.textContent = `Collection « ${collection.name} » supprimée.`;
+        setUiText(managedCollectionsStatus, "Collection « {name} » supprimée.", { name: collection.name });
         await loadManagedCollections();
         await loadDashboard(true);
       } catch (error) {
@@ -2111,11 +2140,11 @@ async function loadManagedCollections() {
 }
 
 function renderImportResult(summary) {
-  importSummary.textContent = formatImportSummary(summary);
+  setUiText(importSummary, () => formatImportSummary(summary));
   importIssueList.replaceChildren();
   for (const issue of summary.issues) {
     const item = document.createElement("li");
-    item.textContent = `Ligne ${formatCount(issue.line)} — ${issue.reason}`;
+    setUiText(item, "Ligne {line} — {reason}", { line: () => formatCount(issue.line), reason: issue.reason });
     importIssueList.append(item);
   }
   importIssues.hidden = summary.issues.length === 0;
@@ -2125,12 +2154,12 @@ function renderImportResult(summary) {
 function diagnosticEmpty(message) {
   const item = document.createElement("li");
   item.className = "diagnostic-empty";
-  item.textContent = message;
+  setUiText(item, message);
   return item;
 }
 
 function renderDiagnostics(diagnostics) {
-  diagnosticsSummary.textContent = formatDiagnosticsSummary(diagnostics);
+  setUiText(diagnosticsSummary, () => formatDiagnosticsSummary(diagnostics));
   invalidCount.textContent = formatCount(diagnostics.invalidRows.length);
   unresolvedCount.textContent = formatCount(diagnostics.unresolvedRows.length);
   invalidDiagnostics.replaceChildren();
@@ -2141,7 +2170,7 @@ function renderDiagnostics(diagnostics) {
   }
   for (const issue of diagnostics.invalidRows) {
     const item = document.createElement("li");
-    item.textContent = `Ligne ${formatCount(issue.line)} — ${issue.reason}`;
+    setUiText(item, "Ligne {line} — {reason}", { line: () => formatCount(issue.line), reason: issue.reason });
     invalidDiagnostics.append(item);
   }
 
@@ -2151,16 +2180,18 @@ function renderDiagnostics(diagnostics) {
   for (const row of diagnostics.unresolvedRows) {
     const item = document.createElement("li");
     const title = document.createElement("strong");
-    title.textContent = row.name;
+    title.textContent = displayedCardName(row);
     const metadata = document.createElement("p");
-    const language = row.language ? ` · langue ${row.language}` : "";
-    const printing = row.printing ? ` · finition ${row.printing}` : "";
-    metadata.textContent = `${row.setCode} · ${row.collectorNumber} · quantité ${formatCount(row.quantity)}${language}${printing} · ${statusLabel(row.status)}`;
+    setUiText(metadata, () => [
+      row.setCode, row.collectorNumber, t("quantité {count}", { count: formatCount(row.quantity) }),
+      row.language ? t("langue {language}", { language: row.language }) : "",
+      row.printing ? t("finition {finish}", { finish: row.printing }) : "", statusLabel(row.status),
+    ].filter(Boolean).join(" · "));
     item.append(title, metadata);
     if (row.candidateUuids.length > 0) {
       const candidates = document.createElement("p");
       candidates.className = "diagnostic-candidates";
-      candidates.textContent = `Candidats : ${row.candidateUuids.join(", ")}`;
+      setUiText(candidates, "Candidats : {ids}", { ids: row.candidateUuids.join(", ") });
       item.append(candidates);
     }
     unresolvedDiagnostics.append(item);
@@ -2172,12 +2203,14 @@ async function loadDashboard(refreshSearchIndex = false) {
   if (refreshSearchIndex) collectionSnapshotCurrent = false;
   clearError();
   setLoading(true);
-  statusRegion.textContent = "Chargement de la collection";
+  setUiText(statusRegion, "Chargement de la collection");
   try {
     if (!invoke) throw new Error("L’interface doit être ouverte depuis l’application DicoMTG.");
     const dashboard = await invoke("load_dashboard", { query: { search: "", colors: [], rarities: [] } });
     if (request !== dashboardRequest) return false;
     setReleaseDates = dashboard.setReleaseDates ?? {};
+    setGameLocalizations(dashboard.localizedNames, dashboard.localizedSets);
+    cardDetailLanguageDirty = !!openedCardDetail;
     updateSearchableCards(dashboard.items);
     renderMetrics(dashboard.metrics);
     overviewDashboard = {
@@ -2205,7 +2238,7 @@ async function loadDashboard(refreshSearchIndex = false) {
     }
     renderActiveCollectionPage(page);
     renderDiagnostics(dashboard.diagnostics);
-    statusRegion.textContent = "Collection chargée";
+    setUiText(statusRegion, "Collection chargée");
     return true;
   } catch (error) {
     if (request === dashboardRequest) showError(String(error));
@@ -2224,13 +2257,13 @@ form.addEventListener("submit", (event) => {
 
 exactCardColors.addEventListener("change", () => {
   cardColorMode.value = exactCardColors.checked ? "exact" : "includes";
-  exactCardColorsLabel.textContent = "Exactement ces couleurs";
+  setUiText(exactCardColorsLabel, "Exactement ces couleurs");
 });
 
 cardColorMode.addEventListener("change", () => {
   exactCardColors.checked = cardColorMode.value === "exact";
   exactCardColors.indeterminate = cardColorMode.value === "atMost";
-  exactCardColorsLabel.textContent = exactCardColors.indeterminate ? "Au maximum ces couleurs" : "Exactement ces couleurs";
+  setUiText(exactCardColorsLabel, exactCardColors.indeterminate ? "Au maximum ces couleurs" : "Exactement ces couleurs");
 });
 
 cardFiltersAdvanced.addEventListener("toggle", refreshCardFilterOptions);
@@ -2246,7 +2279,7 @@ cardDetailSearchForm.addEventListener("submit", (event) => {
   event.preventDefault();
   const cards = findCardsByName(searchableCards, cardDetailSearch.value);
   if (cards.length === 0) {
-    cardDetailSearchError.textContent = "Aucune carte de la collection ne correspond à cette recherche.";
+    setUiText(cardDetailSearchError, "Aucune carte de la collection ne correspond à cette recherche.");
     cardDetailSearchError.hidden = false;
     return;
   }
@@ -2286,7 +2319,7 @@ collectionUrlInput.addEventListener("input", () => {
   if (!collectionUrlInput.value.trim()) return;
   selectedImportFile = undefined;
   fileInput.value = "";
-  collectionFileStatus.textContent = "Aucun fichier sélectionné.";
+  setUiText(collectionFileStatus, "Aucun fichier sélectionné.");
   clearImportError();
 });
 
@@ -2333,7 +2366,7 @@ importForm.addEventListener("submit", async (event) => {
 
   importInProgress = true;
   setImportLoading(true, reimport);
-  statusRegion.textContent = reimport ? "Import de la collection" : "Enregistrement du nom";
+  setUiText(statusRegion, reimport ? "Import de la collection" : "Enregistrement du nom");
   try {
     if (!invoke) throw new Error("L’interface doit être ouverte depuis l’application DicoMTG.");
     const sourceUrl = reimport && !file ? url : null;
@@ -2350,11 +2383,11 @@ importForm.addEventListener("submit", async (event) => {
     setCollectionImportMode(undefined);
     if (summary) renderImportResult(summary);
     else {
-      importSummary.textContent = `Nom enregistré : « ${name} ».`;
+      setUiText(importSummary, "Nom enregistré : « {name} ».", { name });
       importIssues.hidden = true;
     }
     importResult.hidden = false;
-    if (refreshed) statusRegion.textContent = summary ? "Import terminé" : "Nom enregistré";
+    if (refreshed) setUiText(statusRegion, summary ? "Import terminé" : "Nom enregistré");
   } catch (error) {
     showImportError(String(error));
   } finally {
@@ -2376,7 +2409,7 @@ async function refreshReferenceData(force) {
   clearReferenceError();
   referenceResult.hidden = true;
   setReferenceLoading(true);
-  statusRegion.textContent = "Actualisation des données de référence";
+  setUiText(statusRegion, "Actualisation des données de référence");
   try {
     if (!invoke) throw new Error("L’interface doit être ouverte depuis l’application DicoMTG.");
     const catalogReady = new tauriCore.Channel();
@@ -2386,13 +2419,13 @@ async function refreshReferenceData(force) {
       force,
       catalogReady,
     });
-    referenceResult.textContent = formatReferenceUpdate(summary);
+    setUiText(referenceResult, () => formatReferenceUpdate(summary));
     referenceResult.hidden = false;
     if (summary.status === "updated" && (await loadDashboard(true))) {
-      statusRegion.textContent = "Données de référence actualisées";
+      setUiText(statusRegion, "Données de référence actualisées");
     } else if (summary.status === "current") {
       if (summary.setDatesInitialized) await loadDashboard();
-      statusRegion.textContent = "Données de référence à jour";
+      setUiText(statusRegion, "Données de référence à jour");
     }
   } catch (error) {
     await loadDashboard(true);
@@ -2404,22 +2437,71 @@ async function refreshReferenceData(force) {
 
 referenceButton.addEventListener("click", () => {
   refreshReferenceData(true);
+  void refreshGameLocalization(true);
+});
+
+let localizationRefreshing = false;
+async function refreshGameLocalization(force) {
+  if (!invoke || localizationRefreshing) return;
+  localizationRefreshing = true;
+  const progressTimer = window.setTimeout(() => {
+    cardLanguageStatus.hidden = false;
+    setUiText(cardLanguageStatus, "Actualisation des noms officiels…");
+  }, 250);
+  try {
+    if (await invoke("refresh_game_localization", { force })) {
+      await loadDashboard(true);
+    }
+    cardLanguageStatus.hidden = true;
+  } catch {
+    cardLanguageStatus.hidden = false;
+    setUiText(cardLanguageStatus, "Les noms officiels n’ont pas pu être actualisés. Vous pouvez réessayer avec Actualiser.");
+  } finally {
+    window.clearTimeout(progressTimer);
+    localizationRefreshing = false;
+  }
+}
+
+cardLanguageSelect.replaceChildren(...Object.entries(CARD_LANGUAGES).map(([code, label]) =>
+  new Option(label, code)));
+cardLanguageSelect.value = cardLanguage();
+cardLanguageSelect.addEventListener("change", () => {
+  const page = pageFromHash(window.location.hash);
+  setCardLanguage(cardLanguageSelect.value);
+  localStorage.setItem("dicomtg-card-language", cardLanguage());
+  refreshInterfaceLanguage(document.documentElement);
+  document.title = `${pageElements.get(page).dataset.pageTitle} · DicoMTG`;
+  updateSearchableCards(searchableCards);
+  renderCollectionFilterResults();
+  typeAnalysisPending = true;
+  typeAnalysisRequest += 1;
+  cardDetailLanguageDirty = !!openedCardDetail;
+  if (overviewDashboard) {
+    overviewDashboard.dirty = true;
+    renderMetrics(overviewDashboard.metrics);
+    renderDistributions(overviewDashboard.distributions);
+    renderTypeOptions(overviewDashboard.distributions.types);
+  }
+  renderManagedCollections();
+  renderDeckBuilder();
+  renderActiveCollectionPage(page);
+  deckWorkspace.languageChanged();
 });
 
 clearImageCacheButton.addEventListener("click", async () => {
   imageCacheError.hidden = true;
   clearImageCacheButton.disabled = true;
-  clearImageCacheButton.textContent = "Vidage…";
+  setUiText(clearImageCacheButton, "Vidage…");
   try {
     if (!invoke) throw new Error("L’interface doit être ouverte depuis l’application DicoMTG.");
     renderImageCacheStats(await invoke("clear_image_cache"));
-    statusRegion.textContent = "Cache des illustrations vidé";
+    setUiText(statusRegion, "Cache des illustrations vidé");
   } catch (error) {
     imageCacheError.textContent = String(error);
     imageCacheError.hidden = false;
     clearImageCacheButton.disabled = false;
   } finally {
-    clearImageCacheButton.textContent = "Vider le cache";
+    setUiText(clearImageCacheButton, "Vider le cache");
   }
 });
 
@@ -2450,14 +2532,21 @@ for (const target of document.querySelectorAll("[data-mana-symbol]")) {
   target.replaceWith(createManaSymbolText(target.dataset.manaSymbol));
 }
 initializeSortableTables();
+initializeInterfaceLanguage(document.documentElement);
 initializeTableExports();
 renderDeckBuilder();
 routeFromLocation();
 setCollectionImportMode(undefined);
 loadManagedCollections();
-const appUpdater = setupAppUpdater(window.__TAURI__?.core, () => importInProgress || referenceButton.disabled);
+const appUpdater = setupAppUpdater(
+  window.__TAURI__?.core,
+  () => importInProgress || referenceButton.disabled || localizationRefreshing,
+);
 deckWorkspace.preload();
 loadDashboard(true).then((loaded) => {
-  if (loaded) refreshReferenceData(false);
+  if (loaded) {
+    refreshReferenceData(false);
+    void refreshGameLocalization(false);
+  }
   void appUpdater.check();
 });

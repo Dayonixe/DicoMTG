@@ -8,6 +8,7 @@ mod collection_download;
 mod collection_import;
 mod collection_query;
 mod decks;
+mod game_localization;
 mod mtgjson_update;
 mod price;
 mod price_update;
@@ -23,10 +24,12 @@ pub use card_image::{
 };
 pub use card_localization::{
     CardLegalities, CardLocalization, CardLocalizationError, RelatedToken, find_card_french_text,
-    find_english_related_tokens, load_card_localization,
+    find_card_text_for_language, find_english_related_tokens, load_card_localization,
+    load_card_localization_for_language,
 };
 pub use card_localization::{DeckCardLegality, DeckLegalityTarget, load_deck_legalities};
 pub use decks::{Deck, DeckCard, DeckFormat, SavedDeck, import_decks_csv};
+pub use game_localization::{LocalizedCardNames, LocalizedSetNames, update_game_localization};
 pub use storage::decks::{DeckCardInfo, DeckWorkspace};
 pub use collection::{
     CardFinish, CollectionBuildError, CollectionSnapshot, OwnedPrinting, UnresolvedCard,

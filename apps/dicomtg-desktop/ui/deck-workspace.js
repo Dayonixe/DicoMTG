@@ -4,6 +4,8 @@ import {
   deckLandInputs, deckWarnings, groupDeckCards, inventoryForDeck, isConsidering, moveDeckCard,
   recommendCards, resolveDeckPrinting,
 } from "./deck-assistant.js";
+import { compareLocalized, displayedCardName } from "./game-localization.js";
+import { setUiText, t } from "./interface-language.js";
 
 const BOARDS = { main: "Deck principal", commander: "Commandant", sideboard: "Sideboard", considering: "Considering" };
 const collator = new Intl.Collator("fr", { sensitivity: "base" });
@@ -24,7 +26,8 @@ function element(tag, text, className) {
 }
 
 function option(value, name) {
-  const entry = element("option", name);
+  const entry = element("option");
+  setUiText(entry, name);
   entry.value = value;
   return entry;
 }
@@ -38,7 +41,7 @@ function action(label, handler, accessibleLabel) {
 }
 
 function note(message) {
-  return element("p", message, "analytics-note");
+  return element("p", t(message), "analytics-note");
 }
 
 export function createDeckWorkspace(invoke, {
@@ -103,6 +106,7 @@ export function createDeckWorkspace(invoke, {
   let previewTimer;
   let previewKey;
   let tokenSignature = "";
+  let languageDirty = false;
   let landInputsSignature;
   const imageRequests = new WeakMap();
   const imageObserver = new IntersectionObserver((entries, observer) => {
@@ -135,7 +139,7 @@ export function createDeckWorkspace(invoke, {
   controls["deck-colors"].append(colorOptions);
 
   function showError(message) {
-    error.textContent = message ? String(message) : "";
+    setUiText(error, message ? String(message) : "");
     error.hidden = !message;
   }
 
@@ -147,6 +151,7 @@ export function createDeckWorkspace(invoke, {
   }
 
   const keyFor = (name) => deckCardKey(info.get(deckCardKey(name))?.name ?? name);
+  const cardLabel = (card) => displayedCardName(info.get(deckCardKey(card.name)) ?? card);
 
   function draftInventory() {
     return inventoryForDeck({ ...workspace, decks: savedDecks }, draft.id, primaryId, keyFor);
@@ -209,18 +214,18 @@ export function createDeckWorkspace(invoke, {
         openDeck(deck);
         controls["deck-name"].focus();
       };
-      const coverButton = action("", edit, "Ouvrir le deck " + deck.name);
+      const coverButton = action("", edit, t("Ouvrir le deck {name}", { name: deck.name }));
       coverButton.className = "deck-library-cover";
       coverButton.tabIndex = -1;
       const cover = deckCoverCard(deck, info);
-      const visual = imageFrame(cover?.name ?? "Deck vide", coverButton);
+      const visual = imageFrame(cover?.name ?? t("Deck vide"), coverButton);
       const body = element("div");
       const heading = element("div", null, "deck-library-heading");
       const title = element("h3");
       const openButton = action(deck.name, edit);
       openButton.className = "deck-library-title";
       title.append(openButton);
-      const label = "Actions pour " + deck.name;
+      const label = t("Actions pour {name}", { name: deck.name });
       heading.append(title, menuButton(label, (trigger) => {
         openActionMenu(trigger, label, [
           ["Modifier", edit],
@@ -336,7 +341,7 @@ export function createDeckWorkspace(invoke, {
   }
 
   function mayDiscard() {
-    return !busy && (!dirty || window.confirm("Abandonner les modifications de ce deck ?"));
+    return !busy && (!dirty || window.confirm(t("Abandonner les modifications de ce deck ?")));
   }
 
   function openDeck(deck, modified = false) {
@@ -414,7 +419,7 @@ export function createDeckWorkspace(invoke, {
     controls["deck-format"].value = draft.format;
     const commanders = draft.cards.filter((card) => card.board === "commander");
     controls["deck-commanders"].hidden = !isCommander;
-    controls["deck-commanders"].textContent = commanders.map((card) => card.name).join(" · ") || noCommander;
+    controls["deck-commanders"].textContent = commanders.map(cardLabel).join(" · ") || t(noCommander);
     const colors = new Set(deckColors(draft, info));
     for (const [color, input] of inputs) {
       input.checked = colors.has(color);
@@ -430,12 +435,17 @@ export function createDeckWorkspace(invoke, {
     updateSearchLabel();
     const stats = deckStats(draft, info);
     updateLandBuilder(stats);
-    const formatSize = formatCount(stats.total) + " cartes · objectif " + formatCount(stats.target);
-    const landSize = formatCount(stats.lands) + " terrains · " + formatCount(stats.recommendedLands) + " recommandés";
-    controls["deck-progress"].textContent = formatSize + " · " + landSize + " · "
-      + formatCount(stats.spellSlots) + " places pour les sorts";
+    const formatSize = t("{count} cartes · objectif {target}", {
+      count: formatCount(stats.total), target: formatCount(stats.target),
+    });
+    const landSize = t("{count} terrains · {recommended} recommandés", {
+      count: formatCount(stats.lands), recommended: formatCount(stats.recommendedLands),
+    });
+    controls["deck-progress"].textContent = [formatSize, landSize,
+      t("{count} places pour les sorts", { count: formatCount(stats.spellSlots) }),
+    ].join(" · ");
     root.querySelector('[data-deck-action="delete"]').hidden = !draft.id;
-    root.querySelector('[data-deck-action="back"]').textContent = draft.id ? "Retour aux decks" : "Annuler";
+    setUiText(root.querySelector('[data-deck-action="back"]'), draft.id ? "Retour aux decks" : "Annuler");
     root.querySelector('[data-deck-action="save"]').disabled = busy || !draft.name.trim();
     root.querySelector('[data-deck-action="replace"]').disabled = busy;
     let inventory;
@@ -450,7 +460,7 @@ export function createDeckWorkspace(invoke, {
   function dot(symbol, detail, tone = "") {
     const indicator = element("span", symbol, "deck-dot" + (tone ? " deck-dot--" + tone : ""));
     indicator.setAttribute("role", "img");
-    indicator.setAttribute("aria-label", detail.replaceAll("\n", ". "));
+    indicator.setAttribute("aria-label", t(detail).replaceAll("\n", ". "));
     return indicator;
   }
 
@@ -460,11 +470,12 @@ export function createDeckWorkspace(invoke, {
     const lines = [...workspace.collections]
       .sort((a, b) => Number(b.id === primaryId) - Number(a.id === primaryId))
       .map(({ id, name }) => name + " : " + formatCount(holdings.get(id) ?? 0));
-    if (!lines.length) lines.push("Aucune collection enregistrée");
-    if (result.origins.length) lines.push("Affectation : " + result.origins
-      .map(({ collection, quantity }) => collection + " ×" + formatCount(quantity)).join(", "));
-    if (result.missing) lines.push(formatCount(result.missing) + " exemplaire(s) manquant(s)");
-    if (result.conflicts.length) lines.push("Dans : " + result.conflicts.join(", "));
+    if (!lines.length) lines.push(t("Aucune collection enregistrée."));
+    if (result.origins.length) lines.push(t("Affectation : {sources}", {
+      sources: result.origins.map(({ collection, quantity }) => collection + " ×" + formatCount(quantity)).join(", "),
+    }));
+    if (result.missing) lines.push(t("{count} exemplaire(s) manquant(s)", { count: formatCount(result.missing) }));
+    if (result.conflicts.length) lines.push(t("Dans : {decks}", { decks: result.conflicts.join(", ") }));
     const indicator = dot("C", lines.join("\n"), result.missing ? "warning" : "source");
     indicator.classList.add("deck-dot--collection");
     indicator.tabIndex = 0;
@@ -490,11 +501,11 @@ export function createDeckWorkspace(invoke, {
     const { warnings, status: legalityStatus } = deckWarnings(
       draft, card, info.get(key), info, legalities.get(key), quantities.get(key) ?? card.quantity,
     );
-    const format = DECK_FORMATS[draft.format].label;
+    const format = t(DECK_FORMATS[draft.format].label);
     let indicator;
-    if (warnings.length) indicator = dot("×", warnings.join("\n"), "illegal");
-    else if (legalityStatus === "legal") indicator = dot("✓", "Légale en " + format, "legal");
-    else if (legalityStatus === "restricted") indicator = dot("✓", "Restreinte en " + format + " · un exemplaire autorisé", "legal");
+    if (warnings.length) indicator = dot("×", warnings.map((warning) => t(warning)).join("\n"), "illegal");
+    else if (legalityStatus === "legal") indicator = dot("✓", t("Légale en {format}", { format }), "legal");
+    else if (legalityStatus === "restricted") indicator = dot("✓", t("Restreinte en {format} · un exemplaire autorisé", { format }), "legal");
     else if (draft.format === "limited") indicator = dot("–", "Légalité selon l’événement");
     else if (draft.format === "freeform") indicator = dot("–", "Format libre");
     else if (!checked.has(key)) indicator = dot("…", "Légalité en cours de vérification", "loading");
@@ -508,7 +519,7 @@ export function createDeckWorkspace(invoke, {
     previewKey = undefined;
     clearCardImage(previewImage, previewState);
     previewName.textContent = "";
-    previewState.textContent = "Survolez le nom d’une carte.";
+    setUiText(previewState, "Survolez le nom d’une carte.");
   }
 
   function cardNameButton(card, quantity) {
@@ -521,11 +532,12 @@ export function createDeckWorkspace(invoke, {
         const key = [item.name, item.setCode, item.collectorNumber].join("\0");
         if (key === previewKey) return;
         previewKey = key;
-        previewName.textContent = item.name;
+        previewName.textContent = displayedCardName(item);
         void showCardImage(item, previewImage, previewState);
       }, delay);
     };
-    const button = action(card.name, () => showCardDetail({ ...printing(), quantity }), "Fiche carte de " + card.name);
+    const label = cardLabel(card);
+    const button = action(label, () => showCardDetail({ ...printing(), quantity }), t("Fiche carte de {name}", { name: label }));
     button.className = "deck-card-name";
     button.addEventListener("mouseenter", () => preview(120));
     button.addEventListener("mouseleave", () => window.clearTimeout(previewTimer));
@@ -557,7 +569,7 @@ export function createDeckWorkspace(invoke, {
     closeActionMenu();
     menuTrigger = trigger;
     cardMenu.setAttribute("aria-label", label);
-    cardMenu.replaceChildren(...items.map(([name, apply]) => action(name, () => {
+    cardMenu.replaceChildren(...items.map(([name, apply]) => action(t(name), () => {
       closeActionMenu(true);
       if (!busy) void apply();
     })));
@@ -615,7 +627,7 @@ export function createDeckWorkspace(invoke, {
     if (draft.format === "commander" && card.board !== "commander") {
       items.push(item("Définir comme commandant", () => move("commander")));
     }
-    openActionMenu(trigger, "Actions pour " + card.name, items);
+    openActionMenu(trigger, t("Actions pour {name}", { name: cardLabel(card) }), items);
   }
 
   function renderCards(getInventory = draftInventory) {
@@ -633,9 +645,10 @@ export function createDeckWorkspace(invoke, {
     const assigned = new Map();
     for (const { label, entries, quantity } of groupDeckCards(draft.cards, info)) {
       const group = element("section", null, "deck-card-group");
-      group.append(element("h4", label + " (" + formatCount(quantity) + ")"));
+      group.append(element("h4", t(label) + " (" + formatCount(quantity) + ")"));
       const list = element("ul", null, "deck-card-list");
-      for (const { card, index } of entries) {
+      const ordered = [...entries].sort((a, b) => compareLocalized(cardLabel(a.card), cardLabel(b.card)));
+      for (const { card, index } of ordered) {
         const li = element("li", null, "deck-compact-row");
         li.dataset.deckCardIndex = String(index);
         const key = keyFor(card.name);
@@ -645,7 +658,7 @@ export function createDeckWorkspace(invoke, {
         if (!considering) assigned.set(key, used + card.quantity);
         const name = cardNameButton(card, result.owned);
         name.dataset.deckFocus = "name-" + index;
-        const trigger = menuButton("Actions pour " + card.name, (button) => openCardMenu(card, button));
+        const trigger = menuButton(t("Actions pour {name}", { name: cardLabel(card) }), (button) => openCardMenu(card, button));
         trigger.dataset.deckFocus = "actions-" + index;
         li.append(
           element("span", formatCount(card.quantity), "deck-card-count"),
@@ -663,7 +676,7 @@ export function createDeckWorkspace(invoke, {
     const tokens = associatedDeckTokens(draft.cards, relatedTokens, keyFor);
     const section = controls["deck-associated-tokens"];
     section.hidden = !tokens.length;
-    const signature = tokens.map(({ scryfallId }) => scryfallId).join(" ");
+    const signature = tokens.map((token) => [token.scryfallId, displayedCardName(token)].join("\0")).join("\0");
     if (signature === tokenSignature) return;
     tokenSignature = signature;
     const list = controls["deck-token-list"];
@@ -672,8 +685,9 @@ export function createDeckWorkspace(invoke, {
     for (const token of tokens) {
       const row = element("li");
       const figure = element("figure");
-      const visual = imageFrame(token.name);
-      figure.append(visual.frame, element("figcaption", token.name));
+      const label = displayedCardName(token);
+      const visual = imageFrame(label);
+      figure.append(visual.frame, element("figcaption", label));
       row.append(figure);
       list.append(row);
       queueImage(visual, token);
@@ -712,9 +726,10 @@ export function createDeckWorkspace(invoke, {
       const description = element("div");
       description.append(cardNameButton(card, inventory(card.name).owned), element("small", card.typeLine ?? ""));
       const command = board === "commander";
+      const label = cardLabel(card);
       row.append(description, action(
-        command ? "Définir comme commandant" : "Ajouter", () => addCard(card, board),
-        command ? "Définir " + card.name + " comme commandant" : "Ajouter " + card.name,
+        t(command ? "Définir comme commandant" : "Ajouter"), () => addCard(card, board),
+        t(command ? "Définir {name} comme commandant" : "Ajouter {name}", { name: label }),
       ));
       list.append(row);
     }
@@ -739,8 +754,8 @@ export function createDeckWorkspace(invoke, {
   }
 
   function updateSearchLabel() {
-    controls["deck-search-label"].textContent = boardInput.value === "commander"
-      ? "Rechercher un commandant" : "Rechercher une carte à ajouter";
+    setUiText(controls["deck-search-label"], boardInput.value === "commander"
+      ? "Rechercher un commandant" : "Rechercher une carte à ajouter");
   }
 
   function runSearch() {
@@ -798,7 +813,7 @@ export function createDeckWorkspace(invoke, {
     if (readingCards) messages.push("Chargement des cartes");
     if (draft && (checkingLegalities || uncheckedTargets().length)) messages.push("Vérification des légalités et des jetons");
     const target = controls["deck-load-state"];
-    target.textContent = messages.join(" · ");
+    setUiText(target, () => messages.map((message) => t(message)).join(" · "));
     target.hidden = !messages.length;
     savedList.setAttribute("aria-busy", String(!!libraryReading && !libraryReady));
     controls["deck-card-list"].setAttribute("aria-busy", String(readingCards || checkingLegalities));
@@ -866,7 +881,7 @@ export function createDeckWorkspace(invoke, {
       dirty = JSON.stringify(draft) !== original;
       draft.id = saved.id;
       draft.revision = saved.revision;
-      status.textContent = dirty ? "Deck enregistré. D’autres modifications restent à enregistrer." : "Deck enregistré.";
+      setUiText(status, dirty ? "Deck enregistré. D’autres modifications restent à enregistrer." : "Deck enregistré.");
       renderLibrary();
     } catch (issue) {
       stale = true;
@@ -895,7 +910,7 @@ export function createDeckWorkspace(invoke, {
       savedDecks.push(saved);
       libraryDirty = true;
       renderLibrary();
-      status.textContent = "Deck dupliqué.";
+      setUiText(status, "Deck dupliqué.");
     } catch (issue) {
       showError(issue);
     } finally {
@@ -904,7 +919,7 @@ export function createDeckWorkspace(invoke, {
   }
 
   async function removeDeck(deck) {
-    if (!invoke || !deck?.id || busy || !window.confirm("Supprimer le deck « " + deck.name + " » ?")) return;
+    if (!invoke || !deck?.id || busy || !window.confirm(t("Supprimer le deck « {name} » ?", { name: deck.name }))) return;
     busy = true;
     showError();
     const { id, revision } = deck;
@@ -915,7 +930,7 @@ export function createDeckWorkspace(invoke, {
       libraryDirty = true;
       if (draft?.id === id) openDeck();
       else renderLibrary();
-      status.textContent = "Deck supprimé.";
+      setUiText(status, "Deck supprimé.");
     } catch (issue) {
       stale = true;
       showError(issue);
@@ -941,12 +956,12 @@ export function createDeckWorkspace(invoke, {
     }
     busy = true;
     showError();
-    status.textContent = "Lecture du fichier CSV…";
+    setUiText(status, "Lecture du fichier CSV…");
     try {
       const decks = await invoke("preview_deck_import", { csv: await file.text(), filename: file.name });
       pendingImport = { decks, replace: replaceImport };
-      importChoice.replaceChildren(...decks.map((deck, index) => option(index, deck.name + " · " + DECK_FORMATS[deck.format].label)));
-      get("deck-import-title").textContent = replaceImport ? "Remplacer le contenu du deck" : "Importer un deck";
+      importChoice.replaceChildren(...decks.map((deck, index) => option(index, deck.name + " · " + t(DECK_FORMATS[deck.format].label))));
+      setUiText(get("deck-import-title"), replaceImport ? "Remplacer le contenu du deck" : "Importer un deck");
       importDialog.showModal();
     } catch (issue) {
       showError(issue);
@@ -960,8 +975,9 @@ export function createDeckWorkspace(invoke, {
     new: () => {
       if (!mayDiscard()) return;
       const names = new Set(savedDecks.map((deck) => deckCardKey(deck.name)));
-      let name = "Nouveau deck";
-      for (let number = 2; names.has(deckCardKey(name)); number++) name = "Nouveau deck " + number;
+      const base = t("Nouveau deck");
+      let name = base;
+      for (let number = 2; names.has(deckCardKey(name)); number++) name = base + " " + number;
       openDeck({ name, format: "standard", colors: [], cards: [] });
       controls["deck-name"].select();
     },
@@ -985,7 +1001,7 @@ export function createDeckWorkspace(invoke, {
         : imported;
       importDialog.close();
       openDeck(deck, true);
-      status.textContent = "Vérifiez le deck, puis enregistrez-le.";
+      setUiText(status, "Vérifiez le deck, puis enregistrez-le.");
     },
   };
   for (const button of root.querySelectorAll("[data-deck-action]")) {
@@ -1042,6 +1058,11 @@ export function createDeckWorkspace(invoke, {
     open() {
       void loadLibrary();
       void refresh();
+      if (languageDirty) {
+        languageDirty = false;
+        renderDeck();
+        if (draft) runSearch();
+      }
       if (draft) {
         refreshLegalityDots();
         renderTokens();
@@ -1059,6 +1080,10 @@ export function createDeckWorkspace(invoke, {
     invalidate(active) {
       stale = true;
       if (active) void refresh();
+    },
+    languageChanged() {
+      languageDirty = true;
+      libraryDirty = true;
     },
   };
 }

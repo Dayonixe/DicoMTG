@@ -100,7 +100,8 @@ test("translates known distribution labels and preserves catalog values", () => 
   assert.equal(distributionLabel("colors", "U"), "Bleu");
   assert.equal(distributionLabel("colors", "C"), "Incolore");
   assert.equal(distributionLabel("rarities", "mythic"), "Mythique");
-  assert.equal(distributionLabel("types", "Creature"), "Creature");
+  assert.equal(distributionLabel("types", "Creature"), "Créature");
+  assert.equal(distributionLabel("types", "Unlisted"), "Unlisted");
 });
 
 test("formats dashboard money and displays missing prices as zero", () => {

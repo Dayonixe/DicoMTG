@@ -1,8 +1,10 @@
 import { finishLabel } from "./formatters.js";
+import { displayedCardName, displayedSetName } from "./game-localization.js";
+import { t } from "./interface-language.js";
 
 const columns = {
-  name: ["Carte", (card) => card.name],
-  setCode: ["Extension", (card) => card.setCode],
+  name: ["Carte", displayedCardName],
+  setCode: ["Extension", (card) => displayedSetName(card.setCode)],
   collectorNumber: ["Numéro", (card) => card.collectorNumber],
   quantity: ["Qté", (card) => card.quantity],
   finish: ["Finition", (card) => finishLabel(card.finish)],
@@ -23,7 +25,7 @@ function csvCell(value) {
 
 export function cardsTableCsv(items, columnKeys) {
   const fields = columnKeys.map((key) => columns[key]);
-  const header = fields.map(([name]) => csvCell(name)).join(";");
+  const header = fields.map(([name]) => csvCell(t(name))).join(";");
   const rows = items.map((item) => fields.map(([, value]) => csvCell(value(item))).join(";"));
   return "\uFEFF" + [header, ...rows].join("\r\n") + "\r\n";
 }

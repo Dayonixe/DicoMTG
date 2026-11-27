@@ -1,8 +1,9 @@
 use serde::Serialize;
 
-use crate::{Deck, SavedDeck};
+use crate::{Deck, LocalizedCardNames, SavedDeck};
 
 use super::{CollectionStore, OptionalExtension, StorageError, params};
+use super::game_localization::localized_search_name;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -26,6 +27,8 @@ pub struct DeckCardInfo {
     types: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     requested_name: Option<String>,
+    #[serde(skip_serializing_if = "LocalizedCardNames::is_empty")]
+    localized_names: LocalizedCardNames,
 }
 
 #[derive(Debug, Serialize)]
@@ -92,6 +95,7 @@ fn read_card(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeckCardInfo> {
         toughness: row.get(15)?,
         types: list(16)?,
         requested_name: row.get(17)?,
+        localized_names: LocalizedCardNames::new(),
     })
 }
 
@@ -100,6 +104,16 @@ fn deck_data_error(error: serde_json::Error) -> StorageError {
 }
 
 impl CollectionStore {
+    fn add_deck_card_localizations(&self, cards: &mut [DeckCardInfo]) -> Result<(), StorageError> {
+        let localizations = self.localized_card_names(cards.iter().map(|card| card.name.as_str()))?;
+        for card in cards {
+            if let Some(names) = localizations.get(&card.name) {
+                card.localized_names.clone_from(names);
+            }
+        }
+        Ok(())
+    }
+
     pub fn list_saved_decks(&self) -> Result<Vec<SavedDeck>, StorageError> {
         self.connection
             .prepare_cached("SELECT id, revision, document FROM decks ORDER BY id")?
@@ -150,7 +164,7 @@ impl CollectionStore {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         // Drive the catalog lookup from the owned UUIDs.
-        let candidates = transaction.prepare(&format!(
+        let mut candidates = transaction.prepare(&format!(
             "WITH owned AS (
                 SELECT uuid FROM collection_items
                 UNION SELECT uuid FROM catalog_cards
@@ -165,6 +179,7 @@ impl CollectionStore {
             .query_map([], read_card)?
             .collect::<Result<Vec<_>, _>>()?;
         transaction.commit()?;
+        self.add_deck_card_localizations(&mut candidates)?;
         Ok(DeckWorkspace {
             collections,
             holdings,
@@ -207,30 +222,44 @@ impl CollectionStore {
                  ) {CARD_DETAILS}",
             );
             let mut statement = self.connection.prepare_cached(&sql)?;
-            return Ok(statement
+            let mut cards = statement
                 .query_map([names], read_card)?
-                .collect::<Result<_, _>>()?);
+                .collect::<Result<Vec<_>, _>>()?;
+            self.add_deck_card_localizations(&mut cards)?;
+            return Ok(cards);
         }
         if search.chars().count() < 2 {
             return Ok(Vec::new());
         }
         let mut stmt = self.connection.prepare(&format!(
-            "WITH candidates AS (
-                 SELECT MIN(card.uuid) AS uuid, NULL AS requested_name
-                 FROM catalog_cards card
+            "WITH matches(name, match_position) AS (
+                 SELECT card_name, MIN(instr(search_name, ?3))
+                 FROM localized_card_names WHERE instr(search_name, ?3) > 0
+                 GROUP BY card_name
+                 UNION ALL
+                 SELECT name, instr(lower(name), ?1) FROM catalog_cards
+                 WHERE instr(lower(name), ?1) > 0 GROUP BY name COLLATE NOCASE
+             ), ranked AS (
+                 SELECT name, MIN(match_position) as match_position FROM matches
+                 GROUP BY name COLLATE NOCASE
+             ), candidates AS (
+                 SELECT MIN(card.uuid) AS uuid, NULL AS requested_name, ranked.match_position
+                 FROM ranked CROSS JOIN catalog_cards card ON card.name COLLATE NOCASE = ranked.name
                  WHERE card.rarity <> 'token'
-                   AND instr(lower(card.name), lower(?1)) > 0
                    AND (NOT ?2 OR (instr(card.type_line, 'Legendary') > 0
                                    AND instr(card.type_line, 'Creature') > 0)
                                OR instr(lower(card.rules_text), 'can be your commander') > 0)
                  GROUP BY card.name COLLATE NOCASE
-                 ORDER BY instr(lower(card.name), lower(?1)), card.name COLLATE NOCASE
+                 ORDER BY ranked.match_position, card.name COLLATE NOCASE
                  LIMIT 24
              ) {CARD_DETAILS}
-             ORDER BY instr(lower(card.name), lower(?1)), card.name COLLATE NOCASE",
+             ORDER BY candidates.match_position, card.name COLLATE NOCASE",
         ))?;
-        let cards = stmt.query_map(params![search, commander], read_card)?;
-        Ok(cards.collect::<Result<_, _>>()?)
+        let mut cards = stmt
+            .query_map(params![search.to_lowercase(), commander, localized_search_name(search)], read_card)?
+            .collect::<Result<Vec<_>, _>>()?;
+        self.add_deck_card_localizations(&mut cards)?;
+        Ok(cards)
     }
 
     pub fn save_deck(

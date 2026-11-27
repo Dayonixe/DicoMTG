@@ -14,18 +14,18 @@ use dicomtg_core::{
     CollectionStore, DistributionEntry,
     ImportError, MatchResult, RelatedToken, RowIssueReason, analyze_collection,
     analyze_collection_by_type, build_collection,
-    download_collection_csv as fetch_collection_csv, find_card_french_text,
+    download_collection_csv as fetch_collection_csv, find_card_text_for_language,
     find_english_related_tokens,
     google_drive_source_url, import_collection_csv as parse_collection_csv,
     initialize_set_release_dates, is_valid_iso_date,
-    load_card_localization as fetch_card_localization, most_expensive_card,
+    load_card_localization_for_language as fetch_card_localization, most_expensive_card,
     query_collection, rematch_collection, update_catalog_from_mtgjson,
     update_prices_from_cardmarket,
 };
 use serde::{Deserialize, Serialize};
 use dicomtg_core::{
     Deck, DeckCardInfo, DeckCardLegality, DeckLegalityTarget, DeckWorkspace, SavedDeck, import_decks_csv,
-    load_deck_legalities,
+    LocalizedCardNames, LocalizedSetNames, load_deck_legalities, update_game_localization,
 };
 use tauri::{
     State,
@@ -40,6 +40,7 @@ pub struct AppState {
     image_cache: Arc<CardImageCache>,
     card_localizations: Mutex<HashMap<String, CardLocalizationDto>>,
     reference_update_running: Arc<AtomicBool>,
+    localization_update_running: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -57,6 +58,7 @@ impl AppState {
             image_cache: Arc::new(CardImageCache::new(image_directory)),
             card_localizations: Mutex::new(HashMap::new()),
             reference_update_running: Arc::new(AtomicBool::new(false)),
+            localization_update_running: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -78,6 +80,8 @@ pub struct DashboardDto {
     items: Vec<CollectionItemDto>,
     diagnostics: DiagnosticsDto,
     set_release_dates: BTreeMap<String, String>,
+    localized_names: BTreeMap<String, LocalizedCardNames>,
+    localized_sets: LocalizedSetNames,
 }
 
 #[derive(Debug, Serialize)]
@@ -244,7 +248,7 @@ pub struct ImageCacheDto {
 #[serde(rename_all = "camelCase")]
 pub struct CardLocalizationDto {
     set_name: String,
-    french_text: Option<String>,
+    localized_text: Option<String>,
     fallback_text: Option<String>,
     oracle_id: Option<String>,
     legalities: Option<CardLegalities>,
@@ -276,6 +280,9 @@ pub(crate) fn build_dashboard(
     let has_filters =
         !query.search.trim().is_empty() || !query.colors.is_empty() || !query.rarities.is_empty();
     let all_items = query_collection(&collection, &catalog, &prices, &CollectionQuery::default())
+        .map_err(|error| error.to_string())?;
+    let localized_names = store
+        .localized_card_names(all_items.iter().map(CollectionListItem::name))
         .map_err(|error| error.to_string())?;
     let most_expensive_card = most_expensive_card(&all_items)
         .cloned()
@@ -310,6 +317,8 @@ pub(crate) fn build_dashboard(
         set_release_dates: store
             .load_set_release_dates()
             .map_err(|error| error.to_string())?,
+        localized_names,
+        localized_sets: store.localized_set_names().map_err(|error| error.to_string())?,
     })
 }
 
@@ -642,6 +651,32 @@ pub async fn load_deck_workspace(state: State<'_, AppState>) -> Result<DeckWorks
 #[tauri::command]
 pub async fn list_saved_decks(state: State<'_, AppState>) -> Result<Vec<SavedDeck>, String> {
     read_deck_data(&state, CollectionStore::list_saved_decks).await
+}
+
+#[tauri::command]
+pub async fn refresh_game_localization(
+    state: State<'_, AppState>,
+    force: bool,
+) -> Result<bool, String> {
+    let activity = state.update_gate.start_activity()?;
+    if state.localization_update_running.swap(true, Ordering::AcqRel) {
+        return Ok(false);
+    }
+    let running = Arc::clone(&state.localization_update_running);
+    let primary_store = Arc::clone(&state.store);
+    let directory = state.update_directory.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _activity = activity;
+        let _running = ReferenceUpdateGuard(running);
+        let store = primary_store
+            .lock()
+            .map_err(|_| "Base locale indisponible".to_owned())?
+            .open_peer()
+            .map_err(|error| error.to_string())?;
+        update_game_localization(&store, &directory, force).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -993,11 +1028,14 @@ pub fn load_card_localization(
     state: State<'_, AppState>,
     set_code: String,
     collector_number: String,
+    language: Option<String>,
 ) -> Result<CardLocalizationDto, String> {
+    let language = language.as_deref().unwrap_or("fr");
     let key = format!(
-        "{}\0{}",
+        "{}\0{}\0{}",
         set_code.trim().to_ascii_lowercase(),
-        collector_number.trim()
+        collector_number.trim(),
+        language
     );
     if let Some(localization) = state
         .card_localizations
@@ -1009,10 +1047,10 @@ pub fn load_card_localization(
         return Ok(localization);
     }
 
-    let localization = fetch_card_localization(&set_code, &collector_number)
+    let localization = fetch_card_localization(&set_code, &collector_number, language)
         .map(|localization| CardLocalizationDto {
             set_name: localization.set_name().to_owned(),
-            french_text: localization.french_text().map(str::to_owned),
+            localized_text: localization.localized_text().map(str::to_owned),
             fallback_text: localization.fallback_text().map(str::to_owned),
             oracle_id: localization.oracle_id().map(str::to_owned),
             legalities: localization.legalities(),
@@ -1020,17 +1058,20 @@ pub fn load_card_localization(
             needs_english_token_lookup: localization.needs_english_token_lookup(),
         })
         .map_err(|error| error.to_string())?;
-    state
+    let mut cache = state
         .card_localizations
         .lock()
-        .map_err(|_| "card localization cache lock is poisoned".to_owned())?
-        .insert(key, localization.clone());
+        .map_err(|_| "card localization cache lock is poisoned".to_owned())?;
+    if cache.len() >= 512 {
+        cache.clear();
+    }
+    cache.insert(key, localization.clone());
     Ok(localization)
 }
 
 #[tauri::command(async)]
-pub fn load_card_french_text(oracle_id: String) -> Result<Option<String>, String> {
-    find_card_french_text(&oracle_id).map_err(|error| error.to_string())
+pub fn load_card_printed_text(oracle_id: String, language: String) -> Result<Option<String>, String> {
+    find_card_text_for_language(&oracle_id, &language).map_err(|error| error.to_string())
 }
 
 #[tauri::command(async)]

@@ -1,3 +1,5 @@
+import { cardNameMatchRank, normalizeCardSearch } from "./game-localization.js";
+
 const COLOR_BITS = { W: 1, U: 2, B: 4, R: 8, G: 16 };
 
 // The bit positions match the MTGJSON catalog import.
@@ -46,7 +48,7 @@ export function filterCollectionCards(cards, filters = {}) {
   } = filters;
   const selectedColors = colorMask(colors);
   const includeColorless = colors.includes("C");
-  const nameTerm = normalize(name);
+  const nameTerm = normalizeCardSearch(name);
   const textTerm = normalize(text);
   const typeTerm = normalize(type);
   const subtypeTerm = normalize(subtype);
@@ -55,7 +57,7 @@ export function filterCollectionCards(cards, filters = {}) {
   const stats = Object.entries({ manaValue, power, toughness, loyalty })
     .map(([key, value]) => [key, statFilter(value)]).filter(([, matches]) => matches);
   return cards.filter((card) => {
-    if (nameTerm && !normalize(card.name).includes(nameTerm)) return false;
+    if (nameTerm && !cardNameMatchRank(card, nameTerm)) return false;
     if (rarity && card.rarity !== rarity) return false;
     if (colors.length) {
       if (!card.uuid) return false;

@@ -1,37 +1,44 @@
+import { cardNameMatchRank, compareLocalized, displayedCardName, normalizeCardSearch } from "./game-localization.js";
+
 const MAX_SUGGESTIONS = 8;
 
 function normalized(value) {
   return String(value ?? "").trim().toLocaleLowerCase("fr");
 }
 
-function matchesFirst(left, right, query) {
-  const leftStarts = normalized(left).startsWith(query);
-  const rightStarts = normalized(right).startsWith(query);
-  if (leftStarts !== rightStarts) return leftStarts ? -1 : 1;
-  return left.localeCompare(right, "fr", { sensitivity: "base" });
-}
-
 export function cardNameSuggestions(cards, search) {
-  const query = normalized(search);
+  const query = normalizeCardSearch(search);
   const names = new Map();
   for (const card of cards) {
-    const name = String(card.name ?? "").trim();
-    if (name) names.set(normalized(name), name);
+    const key = normalized(card.name);
+    if (!key || names.has(key)) continue;
+    const rank = query ? cardNameMatchRank(card, query) : 1;
+    if (rank) names.set(key, { rank, name: displayedCardName(card), canonical: card.name });
   }
 
+  const labels = new Map();
+  for (const { name } of names.values()) labels.set(name, (labels.get(name) ?? 0) + 1);
   return [...names.values()]
-    .filter((name) => normalized(name).includes(query))
-    .sort((left, right) => matchesFirst(left, right, query))
-    .slice(0, MAX_SUGGESTIONS);
+    .sort((left, right) => right.rank - left.rank || compareLocalized(left.name, right.name))
+    .slice(0, MAX_SUGGESTIONS)
+    .map(({ name, canonical }) => labels.get(name) > 1 ? canonical : name);
 }
 
 export function findCardsByName(cards, search) {
-  const query = normalized(search);
+  const query = normalizeCardSearch(search);
   if (!query) return [];
-  const match =
-    cards.find((card) => normalized(card.name) === query) ??
-    cards.find((card) => normalized(card.name).startsWith(query)) ??
-    cards.find((card) => normalized(card.name).includes(query));
+  let match = cards.find((card) => normalized(card.name) === normalized(search));
+  if (!match) {
+    let bestRank = 0;
+    for (const card of cards) {
+      const rank = cardNameMatchRank(card, query);
+      if (rank > bestRank) {
+        match = card;
+        bestRank = rank;
+      }
+      if (rank === 3) break;
+    }
+  }
   if (!match) return [];
   const name = normalized(match.name);
   return cards.filter((card) => normalized(card.name) === name);

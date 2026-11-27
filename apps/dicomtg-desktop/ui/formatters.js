@@ -1,19 +1,25 @@
-const currencyFormatter = new Intl.NumberFormat("fr-FR", {
-  style: "currency",
-  currency: "EUR",
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
+import { cardLanguage, displayedSetName, magicTerm } from "./game-localization.js";
+import { countText, t } from "./interface-language.js";
 
-const percentFormatter = new Intl.NumberFormat("fr-FR", {
-  style: "percent",
-  maximumFractionDigits: 2,
-});
+const numberOptions = {
+  count: {},
+  size: { maximumFractionDigits: 1 },
+  percent: { style: "percent", maximumFractionDigits: 2 },
+  currency: { style: "currency", currency: "EUR", minimumFractionDigits: 2, maximumFractionDigits: 2 },
+};
+let formatterLocale;
+const formatters = new Map();
 
-const countFormatter = new Intl.NumberFormat("fr-FR");
-const sizeFormatter = new Intl.NumberFormat("fr-FR", {
-  maximumFractionDigits: 1,
-});
+function numberFormatter(kind) {
+  if (formatterLocale !== cardLanguage()) {
+    formatterLocale = cardLanguage();
+    formatters.clear();
+  }
+  if (!formatters.has(kind)) {
+    formatters.set(kind, new Intl.NumberFormat(formatterLocale, numberOptions[kind]));
+  }
+  return formatters.get(kind);
+}
 
 const statusLabels = {
   matched: "Appariée",
@@ -41,6 +47,7 @@ const distributionLabels = {
     uncommon: "Peu commune",
     rare: "Rare",
     mythic: "Mythique",
+    token: "Jeton",
     special: "Spéciale",
     bonus: "Bonus",
   },
@@ -64,15 +71,18 @@ export function cardImageUrl(item, size = "normal", face = "front") {
 }
 
 export function distributionLabel(kind, label) {
-  return distributionLabels[kind]?.[label] ?? label;
+  if (kind === "sets") return displayedSetName(label);
+  if (label === "Autres") return t(label);
+  const uiLabel = distributionLabels[kind]?.[label];
+  return uiLabel ? t(uiLabel) : magicTerm(kind, label);
 }
 
 export function formatCurrency(cents) {
-  return currencyFormatter.format((cents ?? 0) / 100);
+  return numberFormatter("currency").format((cents ?? 0) / 100);
 }
 
 export function formatBytes(bytes) {
-  if (bytes < 1024) return `${formatCount(bytes)} octet${bytes > 1 ? "s" : ""}`;
+  if (bytes < 1024) return countText(bytes, "{count} octet", "{count} octets", formatCount(bytes));
   const units = ["Kio", "Mio", "Gio"];
   let value = bytes / 1024;
   let unit = units[0];
@@ -81,82 +91,72 @@ export function formatBytes(bytes) {
     value /= 1024;
     unit = nextUnit;
   }
-  return `${sizeFormatter.format(value)} ${unit}`;
+  return `${numberFormatter("size").format(value)} ${t(unit)}`;
 }
 
 export function formatPercent(basisPoints) {
-  return percentFormatter.format(basisPoints / 10_000);
+  return numberFormatter("percent").format(basisPoints / 10_000);
 }
 
 export function formatCount(value) {
-  return countFormatter.format(value);
+  return numberFormatter("count").format(value);
 }
 
 export function formatOptionalText(value) {
   return value === null || value === undefined || value === ""
-    ? "Indisponible"
+    ? t("Indisponible")
     : String(value);
 }
 
 export function formatList(values) {
-  return values.length ? values.join(" · ") : "Indisponible";
+  return values.length ? values.join(" · ") : t("Indisponible");
 }
 
 export function statusLabel(status) {
-  return statusLabels[status] ?? "Inconnue";
+  return t(statusLabels[status] ?? "Inconnue");
 }
 
 export function finishLabel(finish) {
-  return finishLabels[finish] ?? "Indisponible";
+  return t(finishLabels[finish] ?? "Indisponible");
 }
 
 export function formatImportSummary(summary) {
   const parts = [
-    `${formatCount(summary.totalQuantity)} carte${summary.totalQuantity > 1 ? "s" : ""} importée${summary.totalQuantity > 1 ? "s" : ""}`,
-    `${formatCount(summary.matchedPrintings)} impression${summary.matchedPrintings > 1 ? "s" : ""} appariée${summary.matchedPrintings > 1 ? "s" : ""}`,
+    countText(summary.totalQuantity, "{count} carte importée", "{count} cartes importées", formatCount(summary.totalQuantity)),
+    countText(summary.matchedPrintings, "{count} impression appariée", "{count} impressions appariées", formatCount(summary.matchedPrintings)),
   ];
-  if (summary.unmatchedRows > 0) {
-    parts.push(
-      `${formatCount(summary.unmatchedRows)} ligne${summary.unmatchedRows > 1 ? "s" : ""} non appariée${summary.unmatchedRows > 1 ? "s" : ""}`,
-    );
-  }
-  if (summary.ambiguousRows > 0) {
-    parts.push(
-      `${formatCount(summary.ambiguousRows)} ligne${summary.ambiguousRows > 1 ? "s" : ""} ambiguë${summary.ambiguousRows > 1 ? "s" : ""}`,
-    );
-  }
-  if (summary.invalidRows > 0) {
-    parts.push(
-      `${formatCount(summary.invalidRows)} ligne${summary.invalidRows > 1 ? "s" : ""} invalide${summary.invalidRows > 1 ? "s" : ""}`,
-    );
-  }
-  if (summary.ignoredRows > 0) {
-    parts.push(
-      `${formatCount(summary.ignoredRows)} ligne${summary.ignoredRows > 1 ? "s" : ""} hors des dossiers Magic ignorée${summary.ignoredRows > 1 ? "s" : ""}`,
-    );
+  for (const [count, singular, plural] of [
+    [summary.unmatchedRows, "{count} ligne non appariée", "{count} lignes non appariées"],
+    [summary.ambiguousRows, "{count} ligne ambiguë", "{count} lignes ambiguës"],
+    [summary.invalidRows, "{count} ligne invalide", "{count} lignes invalides"],
+    [summary.ignoredRows, "{count} ligne hors des dossiers Magic ignorée", "{count} lignes hors des dossiers Magic ignorées"],
+  ]) {
+    if (count > 0) parts.push(countText(count, singular, plural, formatCount(count)));
   }
   return parts.join(" · ");
 }
 
 export function formatReferenceUpdate(summary) {
-  if (summary.status === "running") return "Une actualisation est déjà en cours.";
+  if (summary.status === "running") return t("Une actualisation est déjà en cours.");
   if (summary.status === "current") {
-    return `Données déjà actualisées le ${summary.updateDate}.`;
+    return t("Données déjà actualisées le {date}.", { date: summary.updateDate });
   }
-  return `${formatCount(summary.catalogCards)} carte${summary.catalogCards > 1 ? "s" : ""} de catalogue · ${formatCount(summary.referencePrices)} prix de référence · actualisés le ${summary.updateDate}`;
+  return t("{cards} cartes de catalogue · {prices} prix de référence · actualisés le {date}", {
+    cards: formatCount(summary.catalogCards), prices: formatCount(summary.referencePrices), date: summary.updateDate,
+  });
 }
 
 export function formatDiagnosticsSummary(diagnostics) {
   const invalid = diagnostics.invalidRows.length;
   const unresolved = diagnostics.unresolvedRows.length;
-  if (invalid === 0 && unresolved === 0) return "Aucun diagnostic";
+  if (invalid === 0 && unresolved === 0) return t("Aucun diagnostic");
 
   const parts = [];
   if (invalid > 0) {
-    parts.push(`${formatCount(invalid)} ligne${invalid > 1 ? "s" : ""} invalide${invalid > 1 ? "s" : ""}`);
+    parts.push(countText(invalid, "{count} ligne invalide", "{count} lignes invalides", formatCount(invalid)));
   }
   if (unresolved > 0) {
-    parts.push(`${formatCount(unresolved)} carte${unresolved > 1 ? "s" : ""} à vérifier`);
+    parts.push(countText(unresolved, "{count} carte à vérifier", "{count} cartes à vérifier", formatCount(unresolved)));
   }
   return parts.join(" · ");
 }

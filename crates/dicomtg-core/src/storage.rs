@@ -10,6 +10,7 @@ use std::{
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 pub(crate) mod decks;
+mod game_localization;
 
 use crate::{
     CardCandidate, CardFinish, CatalogCard, CatalogImport, CollectionCard, CollectionSnapshot,
@@ -75,6 +76,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         17,
         include_str!("../migrations/0017_catalog_refresh_state.up.sql"),
     ),
+    (18, include_str!("../migrations/0018_game_localization.up.sql")),
 ];
 
 const SELECTED_PRINTING_UUIDS: &str = "SELECT items.uuid FROM collections

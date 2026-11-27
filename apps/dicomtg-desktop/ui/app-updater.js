@@ -1,3 +1,5 @@
+import { setUiText, t } from "./interface-language.js";
+
 const ignoredUpdateKey = "dicomtg.ignoredAppUpdate";
 
 export function setupAppUpdater(core, isDataBusy) {
@@ -23,32 +25,34 @@ export function setupAppUpdater(core, isDataBusy) {
     elements.notice.hidden = true;
     elements.offer.hidden = true;
     offer = undefined;
-    elements.status.textContent = "Recherche de mises à jour…";
+    setUiText(elements.status, "Recherche de mises à jour…");
     try {
       appStatus ??= await core.invoke("app_update_status");
       elements.current.textContent = appStatus.currentVersion;
       if (!appStatus.configured) {
-        elements.status.textContent = "La mise à jour intégrée sera disponible dans une version signée.";
+        setUiText(elements.status, "La mise à jour intégrée sera disponible dans une version signée.");
         return;
       }
       const update = await core.invoke("check_for_app_update");
       if (!update) {
-        elements.status.textContent = "DicoMTG est à jour.";
+        setUiText(elements.status, "DicoMTG est à jour.");
         return;
       }
       if (!manual && update.version === ignoredVersion) {
-        elements.status.textContent = `Version ${update.version} ignorée.`;
+        setUiText(elements.status, "Version {version} ignorée.", { version: update.version });
         return;
       }
       offer = update;
       elements.version.textContent = offer.version;
-      elements.notes.textContent = offer.notes?.trim() || "Aucune note de publication.";
+      const notes = offer.notes?.trim();
+      if (notes) setUiText(elements.notes, () => notes);
+      else setUiText(elements.notes, "Aucune note de publication.");
       elements.offer.hidden = false;
       elements.notice.hidden = false;
       elements.install.disabled = !appStatus.canInstall;
-      elements.status.textContent = appStatus.canInstall
+      setUiText(elements.status, appStatus.canInstall
         ? "Une mise à jour est disponible."
-        : "L’installation intégrée est disponible depuis une installation Windows de DicoMTG.";
+        : "L’installation intégrée est disponible depuis une installation Windows de DicoMTG.");
     } catch (error) {
       elements.status.textContent = String(error);
     } finally {
@@ -60,10 +64,10 @@ export function setupAppUpdater(core, isDataBusy) {
   async function install() {
     if (!offer || !appStatus.canInstall || installing) return;
     if (isDataBusy()) {
-      elements.status.textContent = "Attendez la fin des opérations en cours, puis réessayez.";
+      setUiText(elements.status, "Attendez la fin des opérations en cours, puis réessayez.");
       return;
     }
-    if (!window.confirm(`Installer DicoMTG ${offer.version} ? L’application va se fermer pour se mettre à jour.`)) return;
+    if (!window.confirm(t("Installer DicoMTG {version} ? L’application va se fermer pour se mettre à jour.", { version: offer.version }))) return;
 
     installing = true;
     elements.check.disabled = true;
@@ -71,12 +75,12 @@ export function setupAppUpdater(core, isDataBusy) {
     elements.ignore.disabled = true;
     elements.progress.removeAttribute("value");
     elements.progress.hidden = false;
-    elements.status.textContent = "Téléchargement de la mise à jour…";
+    setUiText(elements.status, "Téléchargement de la mise à jour…");
     try {
       const progress = new core.Channel();
       progress.onmessage = (event) => {
         if (event.phase === "installing") {
-          elements.status.textContent = "Lancement de l’installation…";
+          setUiText(elements.status, "Lancement de l’installation…");
           elements.progress.removeAttribute("value");
         } else if (event.total > 0) {
           elements.progress.max = event.total;
@@ -108,7 +112,7 @@ export function setupAppUpdater(core, isDataBusy) {
     offer = undefined;
     elements.offer.hidden = true;
     elements.notice.hidden = true;
-    elements.status.textContent = `Version ${ignoredVersion} ignorée.`;
+    setUiText(elements.status, "Version {version} ignorée.", { version: ignoredVersion });
   });
   return {
     check,

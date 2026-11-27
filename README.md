@@ -52,6 +52,11 @@ La première ouverture de chaque journée actualise les données de référence 
 arrière-plan. Le bouton **Actualiser** permet de forcer cette opération sans
 bloquer la navigation.
 
+Dans **Données**, choisissez la langue de l’application et des cartes. Les recherches
+acceptent les noms anglais et les noms imprimés répertoriés par MTGJSON, quelle
+que soit la langue affichée. Les types et mots-clés français suivent la
+terminologie de Magic lorsqu’elle est disponible.
+
 ## Licence
 
 Le code original de DicoMTG est sous [licence MIT](LICENSE). Les données,

@@ -1,4 +1,5 @@
 import { finishLabel, statusLabel } from "./formatters.js";
+import { compareLocalized, displayedCardName } from "./game-localization.js";
 
 const collator = new Intl.Collator("fr", { numeric: true, sensitivity: "base" });
 const rarityRanks = new Map([
@@ -9,7 +10,7 @@ const rarityRanks = new Map([
 ]);
 
 const sortValues = {
-  name: (item) => item.name,
+  name: displayedCardName,
   collectorNumber: (item) => item.collectorNumber,
   quantity: (item) => item.quantity,
   finish: (item) => finishLabel(item.finish),
@@ -64,7 +65,7 @@ export function sortCards(items, sort = DEFAULT_CARD_SORT, setReleaseDates = {})
       const comparison =
         typeof leftValue === "number" && typeof rightValue === "number"
           ? leftValue - rightValue
-          : collator.compare(String(leftValue), String(rightValue));
+          : (sort.key === "name" ? compareLocalized : collator.compare)(String(leftValue), String(rightValue));
       if (comparison !== 0) return comparison * direction;
     }
     if (sort.key === "setCode") {
@@ -76,6 +77,6 @@ export function sortCards(items, sort = DEFAULT_CARD_SORT, setReleaseDates = {})
         || collator.compare(left.rarity ?? "", right.rarity ?? "");
       if (byRarity !== 0) return byRarity;
     }
-    return collator.compare(left.name, right.name);
+    return compareLocalized(displayedCardName(left), displayedCardName(right));
   });
 }

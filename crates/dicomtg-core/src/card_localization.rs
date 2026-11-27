@@ -18,7 +18,7 @@ static SCRYFALL_AGENT: LazyLock<Agent> = LazyLock::new(|| {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CardLocalization {
     set_name: String,
-    french_text: Option<String>,
+    localized_text: Option<String>,
     fallback_text: Option<String>,
     oracle_id: Option<String>,
     legalities: Option<CardLegalities>,
@@ -34,7 +34,12 @@ impl CardLocalization {
 
     #[must_use]
     pub fn french_text(&self) -> Option<&str> {
-        self.french_text.as_deref()
+        self.localized_text()
+    }
+
+    #[must_use]
+    pub fn localized_text(&self) -> Option<&str> {
+        self.localized_text.as_deref()
     }
 
     #[must_use]
@@ -334,15 +339,15 @@ impl ScryfallCard {
         token_links(self.id.as_deref(), self.all_parts.as_deref().unwrap_or_default())
     }
 
-    fn printed_rules(&self, require_french: bool) -> Option<String> {
-        let oracle_text = self.oracle_text.as_deref().filter(|_| require_french);
+    fn printed_rules(&self, require_localized: bool) -> Option<String> {
+        let oracle_text = self.oracle_text.as_deref().filter(|_| require_localized);
         if let Some(text) = usable_printed_text(self.printed_text.as_deref(), oracle_text) {
             return Some(text.to_owned());
         }
 
         let mut faces = Vec::new();
         for face in self.card_faces.as_ref()? {
-            let oracle_text = face.oracle_text.as_deref().filter(|_| require_french);
+            let oracle_text = face.oracle_text.as_deref().filter(|_| require_localized);
             if let Some(text) = usable_printed_text(face.printed_text.as_deref(), oracle_text) {
                 faces.push(match face.printed_name.as_deref().map(str::trim) {
                     Some(name) if !name.is_empty() => format!("{name}\n{text}"),
@@ -387,9 +392,25 @@ pub fn load_card_localization(
     set_code: &str,
     collector_number: &str,
 ) -> Result<CardLocalization, CardLocalizationError> {
-    load_card_localization_with(set_code, collector_number, |url| {
+    load_card_localization_for_language(set_code, collector_number, "fr")
+}
+
+pub fn load_card_localization_for_language(
+    set_code: &str,
+    collector_number: &str,
+    language: &str,
+) -> Result<CardLocalization, CardLocalizationError> {
+    load_card_localization_with(set_code, collector_number, language, |url| {
         download_json(&SCRYFALL_AGENT, url)
     })
+}
+
+fn validate_card_language(language: &str) -> Result<(), CardLocalizationError> {
+    if matches!(language, "en" | "fr" | "de" | "es" | "it" | "pt" | "ja") {
+        Ok(())
+    } else {
+        Err(CardLocalizationError::InvalidRequest("invalid card language"))
+    }
 }
 
 fn printing_url(
@@ -417,29 +438,32 @@ fn printing_url(
 fn load_card_localization_with(
     set_code: &str,
     collector_number: &str,
+    language: &str,
     mut download: impl FnMut(&str) -> Result<Option<Vec<u8>>, CardLocalizationError>,
 ) -> Result<CardLocalization, CardLocalizationError> {
+    validate_card_language(language)?;
     let url = printing_url(set_code, collector_number)?;
-    let (mut card, is_french) = if let Some(bytes) = download(&format!("{url}/fr"))? {
-        let card: ScryfallCard = serde_json::from_slice(&bytes)?;
-        let is_french = card.lang.as_deref() == Some("fr");
-        (card, is_french)
-    } else {
-        let bytes = download(&format!("{url}/en"))?.ok_or(CardLocalizationError::Unavailable)?;
-        (serde_json::from_slice(&bytes)?, false)
+    let bytes = match download(&format!("{url}/{language}"))? {
+        Some(bytes) => bytes,
+        None if language != "en" => {
+            download(&format!("{url}/en"))?.ok_or(CardLocalizationError::Unavailable)?
+        }
+        None => return Err(CardLocalizationError::Unavailable),
     };
-    let french_text = is_french.then(|| card.printed_rules(true)).flatten();
-    let fallback_text = if is_french && french_text.is_none() {
+    let mut card: ScryfallCard = serde_json::from_slice(&bytes)?;
+    let is_localized = language != "en" && card.lang.as_deref() == Some(language);
+    let localized_text = is_localized.then(|| card.printed_rules(true)).flatten();
+    let fallback_text = if is_localized && localized_text.is_none() {
         card.printed_rules(false)
     } else {
         None
     };
     let related_tokens = card.take_related_tokens();
     let needs_english_token_lookup =
-        is_french && related_tokens.is_empty() && card.oracle_id.is_some();
+        is_localized && related_tokens.is_empty() && card.oracle_id.is_some();
     Ok(CardLocalization {
         set_name: card.set_name,
-        french_text,
+        localized_text,
         fallback_text,
         oracle_id: card.oracle_id,
         legalities: card.legalities,
@@ -481,20 +505,29 @@ fn find_english_related_tokens_with(
 }
 
 pub fn find_card_french_text(oracle_id: &str) -> Result<Option<String>, CardLocalizationError> {
-    find_card_french_text_with(oracle_id, |url| download_json(&SCRYFALL_AGENT, url))
+    find_card_text_for_language(oracle_id, "fr")
 }
 
-fn find_card_french_text_with(
+pub fn find_card_text_for_language(
     oracle_id: &str,
+    language: &str,
+) -> Result<Option<String>, CardLocalizationError> {
+    find_card_text_with(oracle_id, language, |url| download_json(&SCRYFALL_AGENT, url))
+}
+
+fn find_card_text_with(
+    oracle_id: &str,
+    language: &str,
     download: impl FnOnce(&str) -> Result<Option<Vec<u8>>, CardLocalizationError>,
 ) -> Result<Option<String>, CardLocalizationError> {
+    validate_card_language(language)?;
     if !is_scryfall_id(oracle_id) {
         return Err(CardLocalizationError::InvalidRequest(
             "invalid Oracle identifier",
         ));
     }
 
-    let query = encode_path_segment(&format!("oracleid:{oracle_id} lang:fr"));
+    let query = encode_path_segment(&format!("oracleid:{oracle_id} lang:{language}"));
     let url = format!("https://api.scryfall.com/cards/search?q={query}&unique=prints");
     let Some(bytes) = download(&url)? else {
         return Ok(None);
@@ -504,7 +537,7 @@ fn find_card_french_text_with(
         .data
         .into_iter()
         .filter(|printing| {
-            printing.lang.as_deref() == Some("fr")
+            printing.lang.as_deref() == Some(language)
                 && printing.oracle_id.as_deref() == Some(oracle_id)
         })
         .find_map(|printing| printing.printed_rules(true)))
@@ -537,7 +570,7 @@ fn download_json(agent: &Agent, url: &str) -> Result<Option<Vec<u8>>, CardLocali
 mod tests {
     use std::cell::Cell;
 
-    use super::{CardLocalizationError, find_card_french_text_with, load_card_localization_with};
+    use super::{CardLocalizationError, find_card_text_with, load_card_localization_with};
 
     #[test]
     fn deck_legality_matches_printings_without_using_the_display_name_as_a_key() {
@@ -570,7 +603,7 @@ mod tests {
 
     #[test]
     fn ui_012_returns_official_french_text_and_set_name() {
-        let localization = load_card_localization_with("c21", "263", |url| {
+        let localization = load_card_localization_with("c21", "263", "fr", |url| {
             assert!(url.ends_with("/c21/263/fr"));
             Ok(Some(
                 br#"{"set_name":"Commander 2021","lang":"fr","printed_text":"Ajoutez deux manas.","card_faces":null}"#
@@ -587,7 +620,7 @@ mod tests {
 
     #[test]
     fn returns_only_direct_token_links_from_the_card_response() {
-        let localization = load_card_localization_with("som", "223", |url| {
+        let localization = load_card_localization_with("som", "223", "fr", |url| {
             assert!(url.ends_with("/som/223/fr"));
             Ok(Some(
                 br#"{"set_name":"Scars of Mirrodin","lang":"fr",
@@ -638,7 +671,7 @@ mod tests {
                 "Starscape Cleric",
             ),
         ] {
-            let localization = load_card_localization_with(set, number, |url| {
+            let localization = load_card_localization_with(set, number, "fr", |url| {
                 assert!(url.ends_with(&format!("/{set}/{number}/fr")));
                 Ok(Some(serde_json::to_vec(&serde_json::json!({
                     "set_name": "Set",
@@ -670,7 +703,7 @@ mod tests {
 
     #[test]
     fn returns_card_legalities_with_the_existing_metadata_request() {
-        let localization = load_card_localization_with("tst", "1", |url| {
+        let localization = load_card_localization_with("tst", "1", "fr", |url| {
             assert!(url.ends_with("/tst/1/fr"));
             Ok(Some(
                 br#"{"set_name":"Test Set","lang":"fr","legalities":{
@@ -696,7 +729,7 @@ mod tests {
     #[test]
     fn ui_012_uses_french_text_from_another_printing_of_the_same_card() {
         let oracle_id = "00000000-0000-4000-8000-000000000001";
-        let french_text = find_card_french_text_with(oracle_id, |url| {
+        let french_text = find_card_text_with(oracle_id, "fr", |url| {
             assert!(url.contains(&format!("q=oracleid%3A{oracle_id}%20lang%3Afr")));
             Ok(Some(
                 br#"{"data":[
@@ -714,7 +747,7 @@ mod tests {
 
     #[test]
     fn ui_012_keeps_the_received_text_when_localized_metadata_repeats_english_rules() {
-        let localization = load_card_localization_with("eoe", "128", |url| {
+        let localization = load_card_localization_with("eoe", "128", "fr", |url| {
             assert!(url.ends_with("/eoe/128/fr"));
             Ok(Some(
                     br#"{"set_name":"Edge of Eternities","oracle_id":"same-card","lang":"fr","oracle_text":"Destroy all creatures.","printed_text":" Destroy all\ncreatures. "}"#
@@ -734,7 +767,7 @@ mod tests {
     #[test]
     fn ui_012_uses_english_only_for_the_set_name_when_french_is_missing() {
         let calls = Cell::new(0);
-        let localization = load_card_localization_with("tst", "1", |url| {
+        let localization = load_card_localization_with("tst", "1", "fr", |url| {
             calls.set(calls.get() + 1);
             if url.ends_with("/fr") {
                 Ok(None)
@@ -754,16 +787,31 @@ mod tests {
 
     #[test]
     fn ui_012_rejects_invalid_keys_before_network_access() {
-        let error = load_card_localization_with("", "1", |_| {
+        let error = load_card_localization_with("", "1", "fr", |_| {
             panic!("invalid input must not reach the network")
         })
         .unwrap_err();
 
         assert!(matches!(error, CardLocalizationError::InvalidRequest(_)));
-        let error = find_card_french_text_with("not-an-oracle-id", |_| {
+        let error = find_card_text_with("not-an-oracle-id", "fr", |_| {
             panic!("invalid input must not reach the network")
         })
         .unwrap_err();
         assert!(matches!(error, CardLocalizationError::InvalidRequest(_)));
+    }
+
+    #[test]
+    fn reads_only_the_selected_printed_language_and_supports_an_english_fallback() {
+        let localization = load_card_localization_with("tst", "1", "de", |url| {
+            assert!(url.ends_with("/de"));
+            Ok(Some(br#"{"set_name":"Test","lang":"de","printed_text":"Ziehe eine Karte."}"#.to_vec()))
+        }).unwrap();
+        assert_eq!(localization.localized_text(), Some("Ziehe eine Karte."));
+
+        let localization = load_card_localization_with("tst", "1", "en", |url| {
+            assert!(url.ends_with("/en"));
+            Ok(Some(br#"{"set_name":"Test","lang":"en","oracle_text":"Draw a card."}"#.to_vec()))
+        }).unwrap();
+        assert_eq!(localization.localized_text(), None);
     }
 }

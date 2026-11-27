@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { runInNewContext } from "node:vm";
+import { runInNewContext as runScript } from "node:vm";
 
 import {
   filterOverviewItems, mostExpensiveOverviewItem, nextChartSelection,
@@ -9,7 +9,13 @@ import {
 } from "./charts.js";
 import { findCardsByName, groupCardPrintings, groupCardVariants } from "./card-search.js";
 import { cardsTableCsv } from "./csv-export.js";
+import { cardLanguage, displayedCardName, displayedSetName, setGameLocalizations } from "./game-localization.js";
+import { countText, setUiAttribute, setUiText, t } from "./interface-language.js";
 import { PAGE_IDS, pageFromHash } from "./navigation.js";
+
+function runInNewContext(code, context) {
+  return runScript(code, Object.assign(context, { countText, setUiAttribute, setUiText, t, cardLanguage }));
+}
 
 test("exposes the Power BI views and the local data workspace", () => {
   assert.deepEqual(PAGE_IDS, [
@@ -296,7 +302,7 @@ test("shows one Wurm detail with separate quantities, rules and galleries", () =
     return { fields, querySelector: (selector) => fields[selector], setAttribute() {} };
   };
   runInNewContext(render + "\nshowCardDetail(small);", {
-    small, findCardsByName, groupCardPrintings, groupCardVariants,
+    small, findCardsByName, groupCardPrintings, groupCardVariants, displayedCardName,
     searchableCards: [large, small],
     cardDetailTitle: title, cardDetailSearch: {}, cardDetailSearchError: {},
     cardDetailContent: { append: (...blocks) => displayed.push(...blocks) },
@@ -331,10 +337,10 @@ test("keeps the rules panel text-only and prefers French rules to received Engli
 
   const script = readFileSync(new URL("./app.js", import.meta.url), "utf8");
   const localize = script.slice(
-    script.indexOf("function loadAlternateFrenchText("),
+    script.indexOf("function loadAlternatePrintedText("),
     script.indexOf("function renderEdhrecGauge("),
   );
-  for (const frenchText of [null, "Piochez une carte."]) {
+  for (const localizedText of [null, "Piochez une carte."]) {
     const printings = ["128", "335"].map((collectorNumber) => ({
       item: { uuid: "owned-printing", setCode: "EOE", collectorNumber },
       setName: {},
@@ -346,9 +352,11 @@ test("keeps the rules panel text-only and prefers French rules to received Engli
       detail: { printings, rules: {} },
       cardDetailRequestId: 1,
       setManaSymbolText: (_node, text) => shownTexts.push(text),
-      alternateFrenchTextRequests: new Map(),
-      invoke: async (command, { collectorNumber, oracleId }) => {
-        if (command === "load_card_french_text") {
+      cardLanguage, displayedSetName,
+      alternatePrintedTextRequests: new Map(),
+      invoke: async (command, { collectorNumber, oracleId, language }) => {
+        assert.equal(language, "fr");
+        if (command === "load_card_printed_text") {
           assert.equal(oracleId, "card-id");
           return new Promise((resolve) => {
             finishAlternateLookup = () => resolve("Piochez deux cartes.");
@@ -356,7 +364,7 @@ test("keeps the rules panel text-only and prefers French rules to received Engli
         }
         if (collectorNumber === "335") {
           return new Promise((resolve) => {
-            finishSecondPrinting = () => resolve({ setName: "Edge of Eternities", frenchText });
+            finishSecondPrinting = () => resolve({ setName: "Edge of Eternities", localizedText });
           });
         }
         return { setName: "Edge of Eternities", fallbackText: "Draw a card.", oracleId: "card-id" };
@@ -364,7 +372,7 @@ test("keeps the rules panel text-only and prefers French rules to received Engli
     });
     await new Promise(setImmediate);
     assert.deepEqual(shownTexts, ["Draw a card."]);
-    if (frenchText) {
+    if (localizedText) {
       finishSecondPrinting();
       await new Promise(setImmediate);
       finishAlternateLookup();
@@ -376,14 +384,14 @@ test("keeps the rules panel text-only and prefers French rules to received Engli
     }
     await localization;
 
-    assert.deepEqual(shownTexts, ["Draw a card.", frenchText ?? "Piochez deux cartes."]);
+    assert.deepEqual(shownTexts, ["Draw a card.", localizedText ?? "Piochez deux cartes."]);
   }
 });
 
 test("looks for other French printings only once per card across repeated visits", async () => {
   const script = readFileSync(new URL("./app.js", import.meta.url), "utf8");
   const localize = script.slice(
-    script.indexOf("function loadAlternateFrenchText("),
+    script.indexOf("function loadAlternatePrintedText("),
     script.indexOf("function renderEdhrecGauge("),
   );
   const printings = ["128", "335", "128s"].map((collectorNumber) => ({
@@ -397,10 +405,11 @@ test("looks for other French printings only once per card across repeated visits
     {
       detail: { printings, rules: {} },
       cardDetailRequestId: 1,
-      alternateFrenchTextRequests: new Map(),
+      cardLanguage, displayedSetName,
+      alternatePrintedTextRequests: new Map(),
       setManaSymbolText: (_node, text) => texts.push(text),
       invoke: async (command, payload) => {
-        if (command === "load_card_french_text") {
+        if (command === "load_card_printed_text") {
           searches.push(payload.oracleId);
           return "Piochez une carte.";
         }
@@ -429,6 +438,7 @@ test("renders the card's format legalities and ignores stale metadata", async ()
 
   const requests = [];
   const context = {
+    cardLanguage, displayedSetName,
     cardDetailRequestId: 1,
     detail: {
       legalities: { querySelectorAll: () => formats },
@@ -484,6 +494,7 @@ test("displays distinct linked tokens below owned printings and loads visible th
   const loaded = [];
   let notify;
   await runInNewContext(observerCode + localize + "\nlocalizeCardDetail(detail, 1);", {
+    cardLanguage, displayedSetName, displayedCardName,
     document: { createElement },
     IntersectionObserver: class {
       constructor(callback) { notify = (entries) => callback(entries, this); }
@@ -525,11 +536,12 @@ test("shows French rules before loading English token links and reuses the looku
   let lookups = 0;
   let finishLookup;
   const metadata = {
-    setName: "Dominaria United", frenchText: "Créez un jeton Oiseau.",
+    setName: "Dominaria United", localizedText: "Créez un jeton Oiseau.",
     oracleId: "aether-channeler", needsEnglishTokenLookup: true,
   };
   const token = { scryfallId: "bird-printing", name: "Bird" };
   const context = {
+    cardLanguage, displayedSetName,
     cardDetailRequestId: 1,
     detail: {
       printings: [{ item: { setCode: "DMU", collectorNumber: "42" }, setName: {} }],
@@ -989,6 +1001,8 @@ test("clears the Types counters when the last collection is deselected", async (
 test("refreshes the complete snapshot and reapplies the filter locally on Cartes", async () => {
   const script = readFileSync(new URL("./app.js", import.meta.url), "utf8");
   const context = {
+    setGameLocalizations,
+    openedCardDetail: null,
     dashboardRequest: 0,
     collectionSnapshotCurrent: true,
     searchableCards: ["ancien"],

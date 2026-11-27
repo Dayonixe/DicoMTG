@@ -135,6 +135,7 @@ fn edhrec_rank_upgrade_schedules_one_refresh_and_keeps_the_catalog() -> Result<(
     drop(store);
 
     let connection = rusqlite::Connection::open(&path)?;
+    connection.execute_batch(include_str!("../migrations/0018_game_localization.down.sql"))?;
     connection.execute_batch(include_str!("../migrations/0017_catalog_refresh_state.down.sql"))?;
     connection.execute_batch(include_str!("../migrations/0016_card_filter_metadata.down.sql"))?;
     connection.execute_batch(include_str!("../migrations/0015_decks.down.sql"))?;
