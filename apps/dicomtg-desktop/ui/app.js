@@ -243,10 +243,13 @@ let searchableCards = [];
 let collectionSnapshotCurrent = false;
 let dashboardRequest = 0;
 let overviewDashboard;
+let dashboardDiagnostics;
+let localizationRevision = 0;
 const overviewChartFilters = { colors: [], types: [], manaValues: [] };
 let typeAnalysis;
 let typeAnalysisPending = false;
 let typeAnalysisRequest = 0;
+const analysisLabelsDirty = new Set();
 const typeChartFilters = { colors: [], manaValues: [] };
 const tableSortStates = new WeakMap();
 const analysisContexts = new WeakMap();
@@ -301,20 +304,23 @@ function routeFromLocation() {
 }
 
 function renderActiveCollectionPage(page) {
+  const labelsChanged = analysisLabelsDirty.delete(page);
   if (page === "card" && openedCardDetail && cardDetailLanguageDirty) {
     showCardDetail(openedCardDetail, false);
   }
   if (page === "overview" && overviewDashboard?.dirty) renderOverviewAnalysis();
   const facetAnalysis = facetAnalyses[page];
   if (facetAnalysis?.entries) {
-    if (!facetAnalysis.baseItems) renderFacetAnalysis(page, facetAnalysis.entries);
+    if (!facetAnalysis.baseItems || labelsChanged) renderFacetAnalysis(page, facetAnalysis.entries);
     else renderVirtualWindow(facetAnalysis.rows);
   }
   if (page === "types") {
     if (typeAnalysisPending) void loadTypeAnalysis();
+    else if (labelsChanged && typeAnalysis) renderTypeAnalysisResults();
     else renderVirtualWindow(typeRows);
   }
   if (page === "collection") {
+    refreshCardFilterOptions();
     if (collectionRowsDirty) renderItems(collectionItems);
     else renderVirtualWindow(rows);
   }
@@ -391,6 +397,12 @@ function refreshCardFilterOptions() {
   cardFilterOptionsDirty = false;
 }
 
+function invalidateCardSearchControls() {
+  if (document.activeElement === collectionSearch) refreshNameSuggestions();
+  if (document.activeElement === cardDetailSearch) refreshDetailSuggestions();
+  cardFilterOptionsDirty = true;
+}
+
 function updateSearchableCards(cards) {
   searchableCards = cards;
   collectionSnapshotCurrent = true;
@@ -400,10 +412,7 @@ function updateSearchableCards(cards) {
     virtualTables.delete(analysis.rows);
     analysis.rows.replaceChildren();
   }
-  refreshNameSuggestions();
-  refreshDetailSuggestions();
-  cardFilterOptionsDirty = true;
-  refreshCardFilterOptions();
+  invalidateCardSearchControls();
 }
 
 function setLoading(loading) {
@@ -2062,7 +2071,7 @@ function renderManagedCollections() {
     name.textContent = collection.name;
     const meta = document.createElement("span");
     meta.className = "managed-collection-meta";
-    meta.textContent = countText(collection.totalQuantity, "{count} carte", "{count} cartes", formatCount(collection.totalQuantity));
+    setUiText(meta, () => countText(collection.totalQuantity, "{count} carte", "{count} cartes", formatCount(collection.totalQuantity)));
     copy.append(name, meta);
     choice.append(checkbox, copy);
 
@@ -2180,7 +2189,7 @@ function renderDiagnostics(diagnostics) {
   for (const row of diagnostics.unresolvedRows) {
     const item = document.createElement("li");
     const title = document.createElement("strong");
-    title.textContent = displayedCardName(row);
+    setUiText(title, () => displayedCardName(row));
     const metadata = document.createElement("p");
     setUiText(metadata, () => [
       row.setCode, row.collectorNumber, t("quantité {count}", { count: formatCount(row.quantity) }),
@@ -2209,7 +2218,7 @@ async function loadDashboard(refreshSearchIndex = false) {
     const dashboard = await invoke("load_dashboard", { query: { search: "", colors: [], rarities: [] } });
     if (request !== dashboardRequest) return false;
     setReleaseDates = dashboard.setReleaseDates ?? {};
-    setGameLocalizations(dashboard.localizedNames, dashboard.localizedSets);
+    const labelsCurrent = acceptGameLocalizations(dashboard);
     cardDetailLanguageDirty = !!openedCardDetail;
     updateSearchableCards(dashboard.items);
     renderMetrics(dashboard.metrics);
@@ -2237,7 +2246,9 @@ async function loadDashboard(refreshSearchIndex = false) {
       analysisContexts.delete(typeRows);
     }
     renderActiveCollectionPage(page);
-    renderDiagnostics(dashboard.diagnostics);
+    dashboardDiagnostics = dashboard.diagnostics;
+    renderDiagnostics(dashboardDiagnostics);
+    if (!labelsCurrent) void refreshDisplayedLocalizations().catch(console.warn);
     setUiText(statusRegion, "Collection chargée");
     return true;
   } catch (error) {
@@ -2441,6 +2452,43 @@ referenceButton.addEventListener("click", () => {
 });
 
 let localizationRefreshing = false;
+
+function acceptGameLocalizations(labels) {
+  const revision = labels.localizationRevision ?? 0;
+  if (revision < localizationRevision) return false;
+  localizationRevision = revision;
+  setGameLocalizations(labels.localizedNames, labels.localizedSets);
+  return true;
+}
+
+function invalidateLocalizedViews() {
+  invalidateCardSearchControls();
+  collectionRowsDirty = true;
+  for (const kind of facetKinds) analysisLabelsDirty.add(kind);
+  analysisLabelsDirty.add("types");
+  cardDetailLanguageDirty = !!openedCardDetail;
+  if (overviewDashboard) overviewDashboard.dirty = true;
+}
+
+async function refreshDisplayedLocalizations() {
+  let cards;
+  let labels;
+  do {
+    cards = searchableCards;
+    labels = await invoke("load_game_localizations", {
+      names: [...new Set(cards.map(({ name }) => name))],
+    });
+  } while (cards !== searchableCards);
+  if (!acceptGameLocalizations(labels)) return;
+
+  invalidateLocalizedViews();
+  if (appliedCardFilters?.name) renderCollectionFilterResults();
+  if (dashboardDiagnostics) renderDiagnostics(dashboardDiagnostics);
+  const page = pageFromHash(window.location.hash);
+  deckWorkspace.invalidate(page === "deck");
+  renderActiveCollectionPage(page);
+}
+
 async function refreshGameLocalization(force) {
   if (!invoke || localizationRefreshing) return;
   localizationRefreshing = true;
@@ -2450,7 +2498,7 @@ async function refreshGameLocalization(force) {
   }, 250);
   try {
     if (await invoke("refresh_game_localization", { force })) {
-      await loadDashboard(true);
+      await refreshDisplayedLocalizations();
     }
     cardLanguageStatus.hidden = true;
   } catch {
@@ -2466,23 +2514,18 @@ cardLanguageSelect.replaceChildren(...Object.entries(CARD_LANGUAGES).map(([code,
   new Option(label, code)));
 cardLanguageSelect.value = cardLanguage();
 cardLanguageSelect.addEventListener("change", () => {
+  if (cardLanguageSelect.value === cardLanguage()) return;
   const page = pageFromHash(window.location.hash);
   setCardLanguage(cardLanguageSelect.value);
   localStorage.setItem("dicomtg-card-language", cardLanguage());
   refreshInterfaceLanguage(document.documentElement);
   document.title = `${pageElements.get(page).dataset.pageTitle} · DicoMTG`;
-  updateSearchableCards(searchableCards);
-  renderCollectionFilterResults();
-  typeAnalysisPending = true;
-  typeAnalysisRequest += 1;
-  cardDetailLanguageDirty = !!openedCardDetail;
+  invalidateLocalizedViews();
   if (overviewDashboard) {
-    overviewDashboard.dirty = true;
     renderMetrics(overviewDashboard.metrics);
     renderDistributions(overviewDashboard.distributions);
     renderTypeOptions(overviewDashboard.distributions.types);
   }
-  renderManagedCollections();
   renderDeckBuilder();
   renderActiveCollectionPage(page);
   deckWorkspace.languageChanged();

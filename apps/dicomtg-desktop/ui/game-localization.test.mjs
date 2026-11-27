@@ -45,3 +45,29 @@ test("a French query can omit accents and resolves to the canonical group", () =
   ];
   assert.deepEqual(findCardsByName(cards, "a la maison"), cards);
 });
+
+test("cached search aliases follow catalog refreshes while retaining all printings", () => {
+  const cards = [{ name: "Abrade", setCode: "HOU" }, { name: "Abrade", setCode: "FDN" }];
+  try {
+    setGameLocalizations({ Abrade: { fr: ["Fissuration"] } });
+    assert.deepEqual(findCardsByName(cards, "Fissuration"), cards);
+
+    setGameLocalizations({ Abrade: { fr: ["Nom de test"] } });
+    assert.deepEqual(findCardsByName(cards, "Fissuration"), []);
+    assert.deepEqual(findCardsByName(cards, "nom de test"), cards);
+    assert.deepEqual(findCardsByName(cards, "Abrade"), cards);
+  } finally {
+    setGameLocalizations({}, {});
+  }
+});
+
+test("ambiguous localized names fall back to the canonical name even at the suggestion limit", () => {
+  const cards = Array.from({ length: 7 }, (_, index) => ({ name: "Alpha " + index }));
+  cards.push(
+    { name: "First title", localizedNames: { fr: ["Zéro"] } },
+    { name: "Second title", localizedNames: { fr: ["Zéro"] } },
+  );
+  assert.deepEqual(cardNameSuggestions(cards, ""), [
+    "Alpha 0", "Alpha 1", "Alpha 2", "Alpha 3", "Alpha 4", "Alpha 5", "Alpha 6", "First title",
+  ]);
+});

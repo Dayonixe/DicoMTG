@@ -69,6 +69,81 @@ const CARD_DETAILS: &str = "
     LEFT JOIN catalog_facets facet ON facet.card_uuid = card.uuid
     GROUP BY card.uuid, candidates.requested_name";
 
+const DECK_SEARCH_INDEX: &str = "
+    CREATE VIRTUAL TABLE IF NOT EXISTS temp.deck_search USING fts5(
+        card_name UNINDEXED, english_name, translated_names, uuid UNINDEXED,
+        commander_uuid UNINDEXED, tokenize='trigram case_sensitive 1', detail='none'
+    );
+    DELETE FROM temp.deck_search;
+    WITH eligible AS (
+        SELECT name, MIN(uuid) AS uuid, MIN(CASE WHEN
+            (instr(type_line, 'Legendary') > 0 AND instr(type_line, 'Creature') > 0)
+            OR instr(lower(rules_text), 'can be your commander') > 0 THEN uuid END) AS commander_uuid
+        FROM catalog_cards WHERE rarity <> 'token' GROUP BY name COLLATE NOCASE
+    ), translated AS (
+        SELECT card_name, json_group_array(search_name) AS names
+        FROM localized_card_names GROUP BY card_name COLLATE NOCASE
+    )
+    INSERT INTO temp.deck_search(card_name, english_name, translated_names, uuid, commander_uuid)
+    SELECT eligible.name, lower(eligible.name), COALESCE(translated.names, '[]'),
+           eligible.uuid, eligible.commander_uuid
+    FROM eligible LEFT JOIN translated ON translated.card_name COLLATE NOCASE = eligible.name";
+
+const INDEXED_DECK_CANDIDATES: &str = "
+    WITH matches AS (
+        SELECT card_name, uuid, commander_uuid, instr(english_name, ?1) AS match_position
+        FROM temp.deck_search WHERE english_name GLOB ?4
+        UNION ALL
+        SELECT card_name, uuid, commander_uuid,
+               (SELECT MIN(NULLIF(instr(value, ?3), 0)) FROM json_each(translated_names))
+        FROM temp.deck_search WHERE translated_names GLOB ?5
+    ), candidates AS (
+        SELECT CASE WHEN ?2 THEN commander_uuid ELSE uuid END AS uuid, NULL AS requested_name,
+               MIN(match_position) AS match_position
+        FROM matches WHERE match_position > 0 AND (NOT ?2 OR commander_uuid IS NOT NULL)
+        GROUP BY card_name COLLATE NOCASE
+        ORDER BY match_position, card_name COLLATE NOCASE LIMIT 24
+    )";
+
+const DECK_CANDIDATES: &str = "
+    WITH matches(name, match_position) AS (
+        SELECT card_name, MIN(instr(search_name, ?3))
+        FROM localized_card_names WHERE instr(search_name, ?3) > 0 GROUP BY card_name
+        UNION ALL
+        SELECT name, instr(lower(name), ?1) FROM catalog_cards
+        WHERE instr(lower(name), ?1) > 0 GROUP BY name COLLATE NOCASE
+    ), ranked AS (
+        SELECT name, MIN(match_position) AS match_position FROM matches GROUP BY name COLLATE NOCASE
+    ), candidates AS (
+        SELECT MIN(card.uuid) AS uuid, NULL AS requested_name, ranked.match_position
+        FROM ranked CROSS JOIN catalog_cards card ON card.name COLLATE NOCASE = ranked.name
+        WHERE card.rarity <> 'token'
+          AND (NOT ?2 OR (instr(card.type_line, 'Legendary') > 0
+                         AND instr(card.type_line, 'Creature') > 0)
+                   OR instr(lower(card.rules_text), 'can be your commander') > 0)
+        GROUP BY card.name COLLATE NOCASE
+        ORDER BY ranked.match_position, card.name COLLATE NOCASE LIMIT 24
+    )";
+
+fn deck_search_revision(connection: &rusqlite::Connection) -> rusqlite::Result<i64> {
+    connection.query_row("SELECT revision FROM deck_search_revision WHERE singleton = 1", [], |row| row.get(0))
+}
+
+fn substring_pattern(search: &str) -> String {
+    let mut pattern = String::with_capacity(search.len() + 2);
+    pattern.push('*');
+    for letter in search.chars() {
+        match letter {
+            '*' => pattern.push_str("[*]"),
+            '?' => pattern.push_str("[?]"),
+            '[' => pattern.push_str("[[]"),
+            _ => pattern.push(letter),
+        }
+    }
+    pattern.push('*');
+    pattern
+}
+
 fn read_card(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeckCardInfo> {
     let list = |index| -> rusqlite::Result<Vec<String>> {
         let value: Option<String> = row.get(index)?;
@@ -104,6 +179,18 @@ fn deck_data_error(error: serde_json::Error) -> StorageError {
 }
 
 impl CollectionStore {
+    /// Populate a connection-local index from a committed snapshot; only TEMP tables are written.
+    pub fn prepare_deck_search(&self) -> Result<(), StorageError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let revision = deck_search_revision(&transaction)?;
+        if self.deck_search_index_revision.get() != Some(revision) {
+            transaction.execute_batch(DECK_SEARCH_INDEX)?;
+        }
+        transaction.commit()?;
+        self.deck_search_index_revision.set(Some(revision));
+        Ok(())
+    }
+
     fn add_deck_card_localizations(&self, cards: &mut [DeckCardInfo]) -> Result<(), StorageError> {
         let localizations = self.localized_card_names(cards.iter().map(|card| card.name.as_str()))?;
         for card in cards {
@@ -231,34 +318,28 @@ impl CollectionStore {
         if search.chars().count() < 2 {
             return Ok(Vec::new());
         }
-        let mut stmt = self.connection.prepare(&format!(
-            "WITH matches(name, match_position) AS (
-                 SELECT card_name, MIN(instr(search_name, ?3))
-                 FROM localized_card_names WHERE instr(search_name, ?3) > 0
-                 GROUP BY card_name
-                 UNION ALL
-                 SELECT name, instr(lower(name), ?1) FROM catalog_cards
-                 WHERE instr(lower(name), ?1) > 0 GROUP BY name COLLATE NOCASE
-             ), ranked AS (
-                 SELECT name, MIN(match_position) as match_position FROM matches
-                 GROUP BY name COLLATE NOCASE
-             ), candidates AS (
-                 SELECT MIN(card.uuid) AS uuid, NULL AS requested_name, ranked.match_position
-                 FROM ranked CROSS JOIN catalog_cards card ON card.name COLLATE NOCASE = ranked.name
-                 WHERE card.rarity <> 'token'
-                   AND (NOT ?2 OR (instr(card.type_line, 'Legendary') > 0
-                                   AND instr(card.type_line, 'Creature') > 0)
-                               OR instr(lower(card.rules_text), 'can be your commander') > 0)
-                 GROUP BY card.name COLLATE NOCASE
-                 ORDER BY ranked.match_position, card.name COLLATE NOCASE
-                 LIMIT 24
-             ) {CARD_DETAILS}
-             ORDER BY candidates.match_position, card.name COLLATE NOCASE",
-        ))?;
-        let mut cards = stmt
-            .query_map(params![search.to_lowercase(), commander, localized_search_name(search)], read_card)?
-            .collect::<Result<Vec<_>, _>>()?;
+        let transaction = self.connection.unchecked_transaction()?;
+        let indexed = !search.contains('\0') && self.deck_search_index_revision.get().is_some()
+            && self.deck_search_index_revision.get() == Some(deck_search_revision(&transaction)?);
+        let candidate_query = if indexed { INDEXED_DECK_CANDIDATES } else { DECK_CANDIDATES };
+        let english = search.to_lowercase();
+        let localized = localized_search_name(search);
+        let mut cards = {
+            let mut stmt = transaction.prepare_cached(&format!(
+                "{candidate_query} {CARD_DETAILS} ORDER BY candidates.match_position, card.name COLLATE NOCASE",
+            ))?;
+            let rows = if indexed {
+                // The indexed text includes JSON escapes. Rank against the individual decoded names.
+                let encoded = serde_json::to_string(&localized).map_err(deck_data_error)?;
+                let translated_pattern = substring_pattern(&encoded[1..encoded.len() - 1]);
+                stmt.query_map(params![english, commander, localized, substring_pattern(&english), translated_pattern], read_card)?
+            } else {
+                stmt.query_map(params![english, commander, localized], read_card)?
+            };
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
         self.add_deck_card_localizations(&mut cards)?;
+        transaction.commit()?;
         Ok(cards)
     }
 

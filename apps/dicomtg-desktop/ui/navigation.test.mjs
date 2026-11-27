@@ -762,18 +762,24 @@ test("uses the shared virtual window for Types on reopen and scroll", () => {
   const typeRows = {};
   const context = {
     typeRows,
+    analysisLabelsDirty: new Set(),
+    typeAnalysis: {},
     typeAnalysisPending: false,
     facetAnalyses: {},
     pageFromHash,
     window: { location: { hash: "#types" }, requestAnimationFrame: (fn) => { context.tick = fn; } },
     collectionFrame: undefined,
     renderVirtualWindow: (target) => calls.push(target),
+    renderTypeAnalysisResults: () => calls.push("relabel"),
   };
   const active = script.slice(script.indexOf("function renderActiveCollectionPage("), script.indexOf("function navigateToPage("));
   const scroll = script.slice(script.indexOf("function scheduleVirtualWindow("), script.indexOf("function createCardRow("));
   runInNewContext(`${active}\n${scroll}\nrenderActiveCollectionPage("types"); scheduleVirtualWindow();`, context);
   context.tick();
   assert.deepEqual(calls, [typeRows, typeRows]);
+  context.analysisLabelsDirty.add("types");
+  runInNewContext('renderActiveCollectionPage("types"); renderActiveCollectionPage("types");', context);
+  assert.deepEqual(calls, [typeRows, typeRows, "relabel", typeRows]);
 });
 
 test("reuses facet tables until the complete collection snapshot changes", () => {
@@ -782,28 +788,35 @@ test("reuses facet tables until the complete collection snapshot changes", () =>
   const summary = { entries: [], rows: { replaceChildren() { calls.push("invalidate"); } } };
   const context = {
     facetAnalyses: { sets: summary },
+    analysisLabelsDirty: new Set(),
     analysisContexts: new WeakMap(),
     virtualTables: new WeakMap(),
     cardFilterOptionsDirty: false,
-    refreshNameSuggestions() {},
-    refreshDetailSuggestions() {},
-    refreshCardFilterOptions() {},
-    renderFacetAnalysis() { calls.push("first"); summary.baseItems = []; },
+    document: { activeElement: null },
+    collectionSearch: {},
+    cardDetailSearch: {},
+    refreshNameSuggestions: () => assert.fail("unfocused suggestions should not be prepared"),
+    refreshDetailSuggestions: () => assert.fail("unfocused suggestions should not be prepared"),
+    renderFacetAnalysis() {
+      calls.push(summary.baseItems ? "relabel" : "first");
+      summary.baseItems ??= [];
+    },
     renderVirtualWindow() { calls.push("reopen"); },
   };
   const active = script.slice(
     script.indexOf("function renderActiveCollectionPage("),
     script.indexOf("function navigateToPage("),
   );
-  const updateStart = script.indexOf("function updateSearchableCards(");
-  const update = script.slice(updateStart, script.indexOf("\nfunction ", updateStart + 1));
+  const update = script.slice(script.indexOf("function invalidateCardSearchControls("), script.indexOf("function setLoading("));
   runInNewContext(`${active}\n${update}
     renderActiveCollectionPage("sets");
+    renderActiveCollectionPage("sets");
+    analysisLabelsDirty.add("sets");
     renderActiveCollectionPage("sets");
     updateSearchableCards([]);
     renderActiveCollectionPage("sets");
   `, context);
-  assert.deepEqual(calls, ["first", "reopen", "invalidate", "first"]);
+  assert.deepEqual(calls, ["first", "reopen", "relabel", "invalidate", "first"]);
 });
 
 test("cross-filters every overview widget from the interactive charts", () => {
@@ -835,6 +848,7 @@ test("renders Overview on demand and reuses totals for the chart's own filter", 
   };
   const context = {
     facetAnalyses: {},
+    analysisLabelsDirty: new Set(),
     overviewDashboard: { dirty: true, metrics: overviewMetrics(items), distributions: totals },
     overviewChartFilters: { colors: [], types: [], manaValues: [] },
     searchableCards: items,
@@ -1001,7 +1015,7 @@ test("clears the Types counters when the last collection is deselected", async (
 test("refreshes the complete snapshot and reapplies the filter locally on Cartes", async () => {
   const script = readFileSync(new URL("./app.js", import.meta.url), "utf8");
   const context = {
-    setGameLocalizations,
+    acceptGameLocalizations: () => true,
     openedCardDetail: null,
     dashboardRequest: 0,
     collectionSnapshotCurrent: true,
@@ -1044,4 +1058,42 @@ test("refreshes the complete snapshot and reapplies the filter locally on Cartes
   assert.deepEqual(context.searchableCards, ["filtré", "nouveau"]);
   assert.deepEqual(context.collectionItems, ["filtré"]);
   assert.equal(context.collectionSnapshotCurrent, true);
+});
+
+test("translation refresh only loads labels and retries if the collection changes during the read", async () => {
+  const script = readFileSync(new URL("./app.js", import.meta.url), "utf8");
+  const code = script.slice(
+    script.indexOf("function acceptGameLocalizations("),
+    script.indexOf("async function refreshGameLocalization("),
+  );
+  const requests = [];
+  const updates = [];
+  const context = {
+    localizationRevision: 0,
+    searchableCards: [{ name: "Old" }, { name: "Old" }],
+    appliedCardFilters: { name: "New" },
+    facetKinds: ["sets"],
+    analysisLabelsDirty: new Set(),
+    openedCardDetail: null,
+    overviewDashboard: {},
+    dashboardDiagnostics: undefined,
+    window: { location: { hash: "#collection" } },
+    pageFromHash,
+    deckWorkspace: { invalidate() {} },
+    invalidateCardSearchControls() {},
+    renderCollectionFilterResults() { updates.push("filtered"); },
+    renderActiveCollectionPage(page) { updates.push(page); },
+    setGameLocalizations(names) { updates.push(names); },
+    invoke: async (command, { names }) => {
+      assert.equal(command, "load_game_localizations");
+      requests.push(Array.from(names));
+      if (requests.length === 1) context.searchableCards = [{ name: "New" }];
+      return { localizationRevision: 4, localizedNames: names[0] };
+    },
+  };
+  await runInNewContext(code + "\nrefreshDisplayedLocalizations();", context);
+  assert.deepEqual(requests, [["Old"], ["New"]]);
+  assert.deepEqual(updates, ["New", "filtered", "collection"]);
+  assert.equal(runInNewContext('acceptGameLocalizations({ localizationRevision: 3 });', context), false);
+  assert.equal(context.localizationRevision, 4);
 });

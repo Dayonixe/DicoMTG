@@ -98,6 +98,7 @@ pub struct CardImageCache {
     directory: PathBuf,
     generation: Mutex<u64>,
     download: Mutex<()>,
+    agent: Agent,
 }
 
 impl CardImageCache {
@@ -107,6 +108,12 @@ impl CardImageCache {
             directory,
             generation: Mutex::new(0),
             download: Mutex::new(()),
+            agent: Agent::new_with_config(
+                Agent::config_builder()
+                    .https_only(true)
+                    .timeout_global(Some(Duration::from_secs(30)))
+                    .build(),
+            ),
         }
     }
 
@@ -119,13 +126,7 @@ impl CardImageCache {
         face: CardImageFace,
     ) -> Result<Vec<u8>, CardImageError> {
         self.load_with(scryfall_id, set_code, collector_number, size, face, |url| {
-            let agent = Agent::new_with_config(
-                Agent::config_builder()
-                    .https_only(true)
-                    .timeout_global(Some(Duration::from_secs(30)))
-                    .build(),
-            );
-            download_image(&agent, url)
+            download_image(&self.agent, url)
         })
     }
 

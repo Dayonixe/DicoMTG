@@ -38,6 +38,7 @@ pub fn run() -> Result<(), tauri::Error> {
             commands::download_collection_csv,
             commands::update_reference_data,
             commands::refresh_game_localization,
+            commands::load_game_localizations,
             commands::load_card_image_bytes,
             commands::load_card_localization,
             commands::load_card_printed_text,

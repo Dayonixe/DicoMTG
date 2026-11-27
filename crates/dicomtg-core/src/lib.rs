@@ -31,6 +31,7 @@ pub use card_localization::{DeckCardLegality, DeckLegalityTarget, load_deck_lega
 pub use decks::{Deck, DeckCard, DeckFormat, SavedDeck, import_decks_csv};
 pub use game_localization::{LocalizedCardNames, LocalizedSetNames, update_game_localization};
 pub use storage::decks::{DeckCardInfo, DeckWorkspace};
+pub use storage::game_localization::GameLocalizations;
 pub use collection::{
     CardFinish, CollectionBuildError, CollectionSnapshot, OwnedPrinting, UnresolvedCard,
     build_collection, rematch_collection,

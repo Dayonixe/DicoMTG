@@ -1,4 +1,5 @@
 use std::{
+    cell::Cell,
     collections::{BTreeMap, HashMap},
     error::Error,
     fmt,
@@ -10,7 +11,7 @@ use std::{
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 pub(crate) mod decks;
-mod game_localization;
+pub(crate) mod game_localization;
 
 use crate::{
     CardCandidate, CardFinish, CatalogCard, CatalogImport, CollectionCard, CollectionSnapshot,
@@ -77,6 +78,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         include_str!("../migrations/0017_catalog_refresh_state.up.sql"),
     ),
     (18, include_str!("../migrations/0018_game_localization.up.sql")),
+    (19, include_str!("../migrations/0019_reference_revisions.up.sql")),
 ];
 
 const SELECTED_PRINTING_UUIDS: &str = "SELECT items.uuid FROM collections
@@ -130,6 +132,7 @@ impl StoredCollection {
 pub struct CollectionStore {
     connection: Connection,
     writer: Arc<Mutex<()>>,
+    deck_search_index_revision: Cell<Option<i64>>,
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -171,6 +174,7 @@ impl CollectionStore {
         Ok(Self {
             connection,
             writer: Arc::new(Mutex::new(())),
+            deck_search_index_revision: Cell::new(None),
         })
     }
 
@@ -546,6 +550,7 @@ impl CollectionStore {
         fingerprint: Option<&str>,
     ) -> Result<(), StorageError> {
         let (_writer, transaction) = self.begin_write()?;
+        transaction.execute("UPDATE deck_search_revision SET revision = revision + 1 WHERE singleton = 1", [])?;
         transaction.execute("DELETE FROM catalog_cards", [])?;
         transaction.execute("DELETE FROM catalog_refresh_state", [])?;
         if let Some(fingerprint) = fingerprint {

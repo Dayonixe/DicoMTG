@@ -52,10 +52,15 @@ export function sortCards(items, sort = DEFAULT_CARD_SORT, setReleaseDates = {})
     ? (item) => Object.hasOwn(setReleaseDates, item.setCode) ? setReleaseDates[item.setCode] : null
     : sortValues[sort.key] ?? sortValues.name;
   const direction = sort.direction === "descending" ? -1 : 1;
+  const compareText = sort.key === "name" ? compareLocalized : collator.compare;
+  const keyed = items.map((item) => {
+    const name = displayedCardName(item);
+    return { item, name, value: valueFor === displayedCardName ? name : valueFor(item) };
+  });
 
-  return [...items].sort((left, right) => {
-    const leftValue = valueFor(left);
-    const rightValue = valueFor(right);
+  return keyed.sort((left, right) => {
+    const { value: leftValue } = left;
+    const { value: rightValue } = right;
     const leftMissing = leftValue === null || leftValue === undefined || leftValue === "";
     const rightMissing =
       rightValue === null || rightValue === undefined || rightValue === "";
@@ -65,18 +70,18 @@ export function sortCards(items, sort = DEFAULT_CARD_SORT, setReleaseDates = {})
       const comparison =
         typeof leftValue === "number" && typeof rightValue === "number"
           ? leftValue - rightValue
-          : (sort.key === "name" ? compareLocalized : collator.compare)(String(leftValue), String(rightValue));
+          : compareText(String(leftValue), String(rightValue));
       if (comparison !== 0) return comparison * direction;
     }
     if (sort.key === "setCode") {
-      const byCode = collator.compare(left.setCode ?? "", right.setCode ?? "");
+      const byCode = collator.compare(left.item.setCode ?? "", right.item.setCode ?? "");
       if (byCode !== 0) return byCode;
     }
     if (sort.key === "rarity" && leftMissing) {
-      const byRarity = Number(!left.rarity) - Number(!right.rarity)
-        || collator.compare(left.rarity ?? "", right.rarity ?? "");
+      const byRarity = Number(!left.item.rarity) - Number(!right.item.rarity)
+        || collator.compare(left.item.rarity ?? "", right.item.rarity ?? "");
       if (byRarity !== 0) return byRarity;
     }
-    return compareLocalized(displayedCardName(left), displayedCardName(right));
-  });
+    return compareLocalized(left.name, right.name);
+  }).map(({ item }) => item);
 }

@@ -25,7 +25,7 @@ use dicomtg_core::{
 use serde::{Deserialize, Serialize};
 use dicomtg_core::{
     Deck, DeckCardInfo, DeckCardLegality, DeckLegalityTarget, DeckWorkspace, SavedDeck, import_decks_csv,
-    LocalizedCardNames, LocalizedSetNames, load_deck_legalities, update_game_localization,
+    GameLocalizations, load_deck_legalities, update_game_localization,
 };
 use tauri::{
     State,
@@ -36,6 +36,7 @@ pub struct AppState {
     pub(crate) update_gate: crate::updater::UpdateGate,
     store: Arc<Mutex<CollectionStore>>,
     collection_writer: Arc<Mutex<CollectionStore>>,
+    deck_search_store: Arc<Mutex<Option<CollectionStore>>>,
     update_directory: PathBuf,
     image_cache: Arc<CardImageCache>,
     card_localizations: Mutex<HashMap<String, CardLocalizationDto>>,
@@ -54,6 +55,7 @@ impl AppState {
             update_gate: crate::updater::UpdateGate::default(),
             store: Arc::new(Mutex::new(store)),
             collection_writer: Arc::new(Mutex::new(collection_writer)),
+            deck_search_store: Arc::new(Mutex::new(None)),
             update_directory,
             image_cache: Arc::new(CardImageCache::new(image_directory)),
             card_localizations: Mutex::new(HashMap::new()),
@@ -80,8 +82,8 @@ pub struct DashboardDto {
     items: Vec<CollectionItemDto>,
     diagnostics: DiagnosticsDto,
     set_release_dates: BTreeMap<String, String>,
-    localized_names: BTreeMap<String, LocalizedCardNames>,
-    localized_sets: LocalizedSetNames,
+    #[serde(flatten)]
+    localizations: GameLocalizations,
 }
 
 #[derive(Debug, Serialize)]
@@ -281,8 +283,8 @@ pub(crate) fn build_dashboard(
         !query.search.trim().is_empty() || !query.colors.is_empty() || !query.rarities.is_empty();
     let all_items = query_collection(&collection, &catalog, &prices, &CollectionQuery::default())
         .map_err(|error| error.to_string())?;
-    let localized_names = store
-        .localized_card_names(all_items.iter().map(CollectionListItem::name))
+    let localizations = store
+        .load_game_localizations(all_items.iter().map(CollectionListItem::name))
         .map_err(|error| error.to_string())?;
     let most_expensive_card = most_expensive_card(&all_items)
         .cloned()
@@ -317,8 +319,7 @@ pub(crate) fn build_dashboard(
         set_release_dates: store
             .load_set_release_dates()
             .map_err(|error| error.to_string())?,
-        localized_names,
-        localized_sets: store.localized_set_names().map_err(|error| error.to_string())?,
+        localizations,
     })
 }
 
@@ -645,7 +646,26 @@ async fn read_deck_data<T: Send + 'static>(
 
 #[tauri::command]
 pub async fn load_deck_workspace(state: State<'_, AppState>) -> Result<DeckWorkspace, String> {
-    read_deck_data(&state, CollectionStore::load_deck_workspace).await
+    let workspace = read_deck_data(&state, CollectionStore::load_deck_workspace).await?;
+    let primary = Arc::clone(&state.store);
+    let search_store = Arc::clone(&state.deck_search_store);
+    let _index_task = tauri::async_runtime::spawn_blocking(move || {
+        let prepare = || -> Result<(), String> {
+            let mut reader = search_store.lock().map_err(|error| error.to_string())?;
+            if reader.is_none() {
+                *reader = Some(primary.lock().map_err(|error| error.to_string())?
+                    .open_peer().map_err(|error| error.to_string())?);
+            }
+            if let Some(reader) = &*reader {
+                reader.prepare_deck_search().map_err(|error| error.to_string())?;
+            }
+            Ok(())
+        };
+        if let Err(error) = prepare() {
+            eprintln!("Index de recherche des decks indisponible : {error}");
+        }
+    });
+    Ok(workspace)
 }
 
 #[tauri::command]
@@ -683,7 +703,26 @@ pub async fn refresh_game_localization(
 pub async fn search_deck_cards(
     state: State<'_, AppState>, search: String, names: Vec<String>, commander: bool,
 ) -> Result<Vec<DeckCardInfo>, String> {
-    read_deck_data(&state, move |store| store.find_deck_cards(&search, &names, commander)).await
+    let search_store = Arc::clone(&state.deck_search_store);
+    let primary = Arc::clone(&state.store);
+    tauri::async_runtime::spawn_blocking(move || {
+        if !search.trim().is_empty() && let Ok(reader) = search_store.try_lock()
+            && let Some(reader) = &*reader
+        {
+            return reader.find_deck_cards(&search, &names, commander).map_err(|error| error.to_string());
+        }
+        let store = primary.lock().map_err(|_| "Base locale indisponible".to_owned())?
+            .open_peer().map_err(|error| error.to_string())?;
+        store.find_deck_cards(&search, &names, commander).map_err(|error| error.to_string())
+    }).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn load_game_localizations(
+    state: State<'_, AppState>,
+    names: Vec<String>,
+) -> Result<GameLocalizations, String> {
+    read_deck_data(&state, move |store| store.load_game_localizations(names.iter().map(String::as_str))).await
 }
 
 #[tauri::command(async)]
